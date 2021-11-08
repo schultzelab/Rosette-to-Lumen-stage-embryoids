@@ -1,0 +1,2753 @@
+---
+title: "Code for Induction of Rosette-to-Lumen stage embryoids using reprogramming paradigms in ESCs"
+author: "Arik Horne"
+date: "23 September 2021"
+output: html_document
+---
+
+
+---
+title: "Generation of expression matrix and Seurat Object"
+author: "Arik Horne"
+date: "14 September 2021"
+output: html_document
+---
+
+### Load R Packages 
+```{r}
+
+### Load Packages:
+
+library(Seurat) 
+library(tidyverse)
+library(readr)
+library(stringr)
+library(tximport)
+library(ggplot2)
+library(future)
+library(future.apply)
+library(harmony)
+library(patchwork)
+library(RColorBrewer)
+library(useful)
+library(dplyr)
+library(stringr)
+library(nichenetr)
+library(tidyr)
+library(corrplot)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+
+```
+
+
+### read tx2genes (to sort transcript IDs to gene IDs) 
+```{r}
+
+tx2gene <- read_csv("C:/Users/arik/SMART-seq2_RtL_embryoids/tx2genes.csv")
+
+```
+
+
+### Create a list out of directories where SMART-seq2 samples are stored.
+```{r}
+
+kallisto_files_3D <- list.files(path = "C:/Users/arik/SMART-seq2_RtL_embryoids/SMART-seq2_kallisto_output_3D",pattern="abundance.h5",recursive=T,full.names=TRUE)
+
+
+kallisto_files_2D <- list.files(path = "C:/Users/arik/SMART-seq2_RtL_embryoids/SMART-seq2_kallisto_output_2D",pattern="abundance.h5",recursive=T,full.names=TRUE)
+
+```
+
+
+### Import of transcript-level abundance, estimated counts and transcript lengths, and summarizes into matrices for use with downstream gene-level analysis packages for RtL-embryoids and 2D monoculture induced equivalents.
+```{r}
+
+tximp_3D  <- tximport(kallisto_files_3D[1:1149], type = "kallisto", tx2gene = tx2gene)
+
+tximp_3D_matrix <- tximp_3D$abundance
+
+tximp_2D  <- tximport(kallisto_files_2D[1:822], type = "kallisto", tx2gene = tx2gene)
+
+tximp_2D_matrix <- tximp_2D$abundance
+
+```
+
+
+### Rename colnames in expression matrix with cell_IDs
+```{r}
+
+cell_ids_3D <- paste(str_split(kallisto_files_3D,pattern = "/",simplify = T)[,7])
+
+cell_ids_2D <- paste(str_split(kallisto_files_2D,pattern = "/",simplify = T)[,7])
+
+colnames(tximp_3D_matrix) <- data.frame(lapply(cell_ids_3D, as.character), stringsAsFactors=FALSE)
+
+colnames(tximp_2D_matrix) <- data.frame(lapply(cell_ids_2D, as.character), stringsAsFactors=FALSE)
+
+
+```
+
+###  Merge two Matrices of the 3D and 2D experiments 
+```{r}
+
+Merge_3D_2D_matrix <- merge.Matrix(tximp_3D_matrix,tximp_2D_matrix,all.x = T,all.y = T,
+                              by.x = rownames(tximp_3D_matrix),
+                              by.y = rownames(tximp_2D_matrix))
+
+```
+
+
+### read tx2genes (to sort Gene IDs to Gene symbols) 
+```{r}
+
+ensembl_to_mgnc <- read.table(paste("C:/Users/arik/SMART-seq2_RtL_embryoids/ID2SYMBOL_gencode_vM16.txt",sep="\t"),header = FALSE)
+
+colnames(ensembl_to_mgnc) <- c("EnsgeneID","HUGOgeneName","NameandID")
+
+```
+
+
+### remove mitochondrial-, pseudo- and ribosomal genes
+```{r}
+
+remove.geneID <- ensembl_to_mgnc[grep(paste(c("^mt-","^Gm","^Rp"), collapse = "|"), ensembl_to_mgnc$HUGOgeneName),"EnsgeneID"]
+
+tximp_3D_matrix <- tximp_3D_matrix[!rownames(tximp_3D_matrix) %in% as.vector(remove.geneID),]
+
+##############################################################################
+
+Merge_3D_2D_matrix  <- Merge_3D_2D_matrix[!rownames(Merge_3D_2D_matrix) %in% as.vector(remove.geneID),]
+
+
+
+```
+
+
+### Create a matrix with Gene symbols
+```{r}
+
+tximp_3D_matrix_row_names<-as.data.frame(rownames(tximp_3D_matrix))
+
+new_name <- merge(x=(tximp_3D_matrix_row_names),y=ensembl_to_mgnc,by.x= "rownames(tximp_3D_matrix)",by.y="EnsgeneID",al.x=TRUE)
+
+rownames(tximp_3D_matrix) <- new_name$HUGOgeneName
+
+##############################################################################
+
+Merge_3D_2D_matrix_row_names<-as.data.frame(rownames(Merge_3D_2D_matrix))
+
+new_name <- merge(x=(Merge_3D_2D_matrix_row_names),y=ensembl_to_mgnc,by.x= "rownames(Merge_3D_2D_matrix)",by.y="EnsgeneID",al.x=TRUE)
+
+rownames(Merge_3D_2D_matrix) <- new_name$HUGOgeneName
+
+
+
+
+
+
+```
+
+### Create a Seurat_RtL_Embryoids object from a feature expression matrix.
+```{r}
+
+Seurat_RtL_Embryoid<- CreateSeuratObject(counts = tximp_3D_matrix)
+
+##############################################################################
+
+Seurat_3D_RtL_Embryoid_2D_culture <- CreateSeuratObject(counts = Merge_3D_2D_matrix)
+
+```
+
+
+---
+title: "Clustering of Seurat Objects"
+author: "Arik Horne"
+date: "15 September 2021"
+output: html_document
+---
+
+
+### We work with 2 Seurat objects 1. Seurat_RtL_Embryoid (SMART-seq2 Data of RtL-Embryoids)
+                                  2. Seurat_3D_RtL_Embryoid_2D_culture (SMART-seq2 Data of RtL-Embryoids + 2D monoculture equivalents)
+
+
+
+### We excluded the cells with less than 2500 expressed genes and less than 500,000 aligned sequencing reads
+```{r}
+Seurat_RtL_Embryoid <- subset(x = Seurat_RtL_Embryoid, subset = nFeature_RNA > 2500 & nCount_RNA > 500000)
+
+##############################################################################
+
+Seurat_3D_RtL_Embryoid_2D_culture <- subset(x = Seurat_3D_RtL_Embryoid_2D_culture, subset = nFeature_RNA > 2500 & nCount_RNA > 500000)
+
+```
+
+
+### LogNormalize the count data present Seurat objects
+```{r}
+Seurat_RtL_Embryoid <- NormalizeData(object = Seurat_RtL_Embryoid, normalization.method = "LogNormalize", scale.factor = 1e4)
+
+##############################################################################
+
+Seurat_3D_RtL_Embryoid_2D_culture <- NormalizeData(object = Seurat_3D_RtL_Embryoid_2D_culture, normalization.method = "LogNormalize", scale.factor = 1e4)
+
+```
+
+
+### Identification of highly variable features
+```{r}
+Seurat_RtL_Embryoid <- FindVariableFeatures(object = Seurat_RtL_Embryoid, selection.method = 'vst', nfeatures = 2000)
+
+##############################################################################
+
+Seurat_3D_RtL_Embryoid_2D_culture <- FindVariableFeatures(object = Seurat_3D_RtL_Embryoid_2D_culture, selection.method = 'vst', nfeatures = 2000)
+
+```
+
+
+###  We apply a linear transformation to the Normalized data, this scales and centers the  features in the datasets
+```{r}
+
+all.genes <- rownames(x = Seurat_RtL_Embryoid)
+
+Seurat_RtL_Embryoid <- ScaleData(object = Seurat_RtL_Embryoid, features = all.genes)
+
+##############################################################################
+
+all.genes <- rownames(x = Seurat_3D_RtL_Embryoid_2D_culture)
+
+Seurat_3D_RtL_Embryoid_2D_culture <- ScaleData(object = Seurat_3D_RtL_Embryoid_2D_culture, features = all.genes)
+
+```
+
+
+### Run a PCA dimensionality reduction scaled data
+```{r}
+
+Seurat_RtL_Embryoid <- RunPCA(object = Seurat_RtL_Embryoid, features = VariableFeatures(object = Seurat_RtL_Embryoid),verbose = FALSE)
+
+##############################################################################
+
+Seurat_3D_RtL_Embryoid_2D_culture <- RunPCA(object = Seurat_3D_RtL_Embryoid_2D_culture, features = VariableFeatures(object = Seurat_3D_RtL_Embryoid_2D_culture),verbose = FALSE)
+
+```
+
+
+### Computes the k.param nearest neighbors for a given dataset and identify clusters of cells by a shared nearest neighbor (SNN)
+```{r}
+
+Seurat_RtL_Embryoid <- FindNeighbors(Seurat_RtL_Embryoid, dims = 1:10)
+
+Seurat_RtL_Embryoid <- FindClusters(Seurat_RtL_Embryoid, resolution = 0.2)
+
+##############################################################################
+
+Seurat_3D_RtL_Embryoid_2D_culture <- FindNeighbors(Seurat_3D_RtL_Embryoid_2D_culture, dims = 1:4)
+
+Seurat_3D_RtL_Embryoid_2D_culture <- FindClusters(Seurat_3D_RtL_Embryoid_2D_culture, resolution = 0.01)
+
+```
+
+
+### 
+```{r}
+
+SMART_Schorle_sub <- RunUMAP(SMART_Schorle_sub, dims = 1:10)
+
+##############################################################################
+
+Seurat_3D_RtL_Embryoid_2D_culture <- RunUMAP(Seurat_3D_RtL_Embryoid_2D_culture, dims = 1:4)
+
+```
+
+
+---
+title: "Fig2_S2"
+author: "Arik Horne, Lisa Holsten"
+date: "15 September 2021"
+output: html_document
+---
+
+
+### We work with 2 Seurat objects 1. Seurat_RtL_Embryoid (SMART-seq2 Data of RtL-Embrioids)
+                                  2. Seurat_3D_RtL_Embrioid_2D_culture (SMART-seq2 Data of RtL-Embrioids + 2D monoculture equivalents)
+
+
+### Figure 2B) UMAP representation of scRNA-seq results, showing 3 distinct transcriptomic clusters. 
+
+```{r}
+
+Idents(Seurat_RtL_Embryoid) <- "cluster_ident"
+
+DimPlot(object = Seurat_RtL_Embryoid, reduction = 'umap')
+
+```
+
+### Figure 2C) Dot Plots showing expression of stem-cell specific marker genes
+
+```{r}
+
+DotPlot(Seurat_RtL_Embryoid, features = c("Amn","Dkk1","Gata4","Sox17","Tdgf1","Nanog","Gdf3","Pou5f1","Cdx2","Elf5","Eomes","Tfap2c"))+ scale_colour_gradient2(low = "#4575B4", mid = "#F1E8BC", high = "#D73027")
+
+```
+
+### Figure S2B) Genes per cell in each cluster
+
+```{r}
+
+# rename cell cluster 
+
+new.cluster.ids <- c("ExE-like cells", "VE-like cells", "Epi-like cells")
+
+names(new.cluster.ids) <- levels(Seurat_RtL_Embryoid )
+
+Seurat_RtL_Embryoid  <- RenameIdents(Seurat_RtL_Embryoid , new.cluster.ids)
+
+# plot genes per Cell
+
+VlnPlot(object = Seurat_RtL_Embryoid , features = c("nCount_RNA"),adjust = 1, log = F, ncol = 1)
+
+
+```
+
+### Figure S2C) Genetic reads per cell in each cluster 
+
+```{r}
+
+# plot genetic reads per Cell
+
+VlnPlot(object = Seurat_RtL_Embryoid , features = c("nFeature_RNA"),adjust = 1, log = F, ncol = 1)
+
+```
+
+### Figure S2D) Plot cell number per cluster
+
+```{r}
+
+# plot Cell number 
+
+table(Seurat_RtL_Embryoid@meta.data$cluster_ident)
+
+```
+
+### Call markers for every cluster compared to all remaining cells, report only the positive
+
+```{r}
+
+Seurat_RtL_Embryoid.marker<- FindAllMarkers(Seurat_RtL_Embryoid, only.pos = TRUE, min.pct = 0.1,test.use = "wilcox", logfc.threshold = log(1.5))
+
+```
+
+### Figure S2F Heatmap showing expression of top 30 differentally expressed genesvariable genes of VE-like cluster, Epi-like cluster, and ExE-like cluster
+
+```{r}
+
+DoHeatmap(Seurat_RtL_Embryoid, features = c("Cubn",
+                                                    "Srgn",
+                                                    "Dab2",
+                                                    "Col4a2",
+                                                    "Pdgfra",
+                                                    "Col4a1",
+                                                    "Amn",
+                                                    "Flrt3",
+                                                    "Habp2",
+                                                    "Npl",
+                                                    "Sox7",
+                                                    "Sox17",
+                                                    "Lama1",
+                                                    "Myo7a",
+                                                    "Klb",
+                                                    "Gata4",
+                                                    "Gata6",
+                                                    "Tfec",
+                                                    "Pth1r",
+                                                    "Rhpn1",
+                                                    "Serpinh1",
+                                                    "Aqp8",
+                                                    "Bend5",
+                                                    "Tfpi",
+                                                    "Gdpd5",
+                                                    "Sparc",
+                                                    "Retreg1",
+                                                    "Lrp2",
+                                                    "Lrpap1",
+                                                    "Rab3il1",
+                                                    "Tdgf1",
+                                                    "Fgf4",
+                                                    "Gdf3",
+                                                    "Igfbp2",
+                                                    "Pla2g1b",
+                                                    "Tdgf1-ps1",
+                                                    "Cmah",
+                                                    "Trh",
+                                                    "Platr10",
+                                                    "Nanog",
+                                                    "Pou5f1",
+                                                    "Gsta4",
+                                                    "Chchd10",
+                                                    "Phc1",
+                                                    "Ifitm3",
+                                                    "Mkrn1",
+                                                    "Dppa5a",
+                                                    "Enpp3",
+                                                    "Zfp985",
+                                                    "Fam60a",
+                                                    "Pipox",
+                                                    "Snrpn",
+                                                    "AC154630.1",
+                                                    "Slc7a3",
+                                                    "Utf1",
+                                                    "Hsf2bp",
+                                                    "Ldhb",
+                                                    "Olfr1388",
+                                                    "Ifitm2",
+                                                    "Eno1","Id2",
+                                                    "Sct",
+                                                    "Cdx2",
+                                                    "Pla2g7",
+                                                    "F11r",
+                                                    "Selenbp1",
+                                                    "Cldn3",
+                                                    "Ak2",
+                                                    "Ahnak",
+                                                    "Errfi1",
+                                                    "Psap",
+                                                    "Sorl1",
+                                                    "Lgals1",
+                                                    "Anxa3",
+                                                    "Rnf128",
+                                                    "Krt19",
+                                                    "Gata3",
+                                                    "Smagp",
+                                                    "Igf2",
+                                                    "Cadm1",
+                                                    "Tspan1",
+                                                    "Bex1",
+                                                    "Ifi35",
+                                                    "Tifa",
+                                                    "Nupr1",
+                                                    "Tpm1",
+                                                    "Tmsb4x",
+                                                    "Bex3",
+                                                    "Rassf4",
+                                                    "Mid1"), label = F)   + scale_fill_gradientn(colors = c("#4575B4", "#F1E8BC", "#D73027"))
+
+
+```
+
+### Figure 2D GO term enrichment analysis of top 100 most differentially expressed genes across the clusters.
+
+```{r}
+
+#### get marker genes for ExE-like cells, VE-like cells, Epi-like cells
+
+ExE.marker <- subset(Seurat_RtL_Embryoid.marker, cluster == "ExE_like_cells")
+
+VE.marker <- subset(Seurat_RtL_Embryoid.marker, cluster == "VE_like_cells")
+
+Epi.marker <- subset(Seurat_RtL_Embryoid.marker, cluster == "Epi_like_cells")
+
+#### get Top100 (fold change) marker genes
+
+ExE_marker <-row.names(ExE.marker <-head(ExE.marker, 100))
+
+VE.marker <-row.names(VE.marker <-head(VE.marker, 100))
+
+Epi.marker <-row.names(Epi.marker <-head(Epi.marker, 100))
+
+#### clusterProfiler with Top100 (fold change) marker genes
+
+ExE_marker_bitr<- bitr(ExE_marker, fromType="SYMBOL", toType=c("ENTREZID","SYMBOL","ENSEMBL"), OrgDb="org.Mm.eg.db")
+
+ExE_marker_bitr<- enrichGO(gene          = ExE_marker_bitr$ENTREZID,
+                                                 OrgDb         = org.Mm.eg.db,
+                                                 ont           = "BP",
+                                                 pAdjustMethod = "fdr",
+                                                 pvalueCutoff  = 0.05,
+                                                 qvalueCutoff  = 0.01,
+                                                 readable      = TRUE)
+
+barplot(ExE_marker_bitr, showCategory=5)
+
+#########################################################################
+
+VE.marker_bitr<- bitr(VE.marker, fromType="SYMBOL", toType=c("ENTREZID","SYMBOL","ENSEMBL"), OrgDb="org.Mm.eg.db")
+
+VE.marker_bitr<- enrichGO(gene          = VE.marker_bitr$ENTREZID,
+                                                 OrgDb         = org.Mm.eg.db,
+                                                 ont           = "BP",
+                                                 pAdjustMethod = "fdr",
+                                                 pvalueCutoff  = 0.05,
+                                                 qvalueCutoff  = 0.01,
+                                                 readable      = TRUE)
+
+barplot(VE.marker_bitr, showCategory=5)
+
+#########################################################################
+
+Epi.marker_bitr<- bitr(Epi.marker, fromType="SYMBOL", toType=c("ENTREZID","SYMBOL","ENSEMBL"), OrgDb="org.Mm.eg.db")
+
+Epi.marker_bitr<- enrichGO(gene          = Epi.marker_bitr$ENTREZID,
+                                                 OrgDb         = org.Mm.eg.db,
+                                                 ont           = "BP",
+                                                 pAdjustMethod = "fdr",
+                                                 pvalueCutoff  = 0.05,
+                                                 qvalueCutoff  = 0.01,
+                                                 readable      = TRUE)
+
+barplot(Epi.marker_bitr, showCategory=5)
+
+
+```
+
+### Figure 2E AUCell-based enrichment scores (AUC scores) showing similarity of gene expression signatures of the three clusters compared to their respective natural counterparts as assessed by Cheng et al. 2019  
+
+```{r}
+
+### Build  expression-based ranking for all the genes in each cell
+
+Seurat_RtL_Embryoid_matrix <-as.data.frame(as.matrix(Seurat_RtL_Embryoid@assays$RNA@data))
+
+filtered_matrix<-rowSums(Seurat_RtL_Embryoid_matrix > 0)
+
+filtered_matrix<-filtered_matrix[filtered_matrix>10]
+
+Seurat_RtL_Embryoid_matrix <- Seurat_RtL_Embryoid_matrix[row.names(Seurat_RtL_Embryoid_matrix) %in% names(filtered_matrix),]
+
+Aucell_Seurat_RtL_Embryoid_matrix <- AUCell_buildRankings(as.matrix(Seurat_RtL_Embryoid_matrix),nCores = 30)
+
+### Create a List of Cheng et al. 2019 signatures. Link for signatures (https://www.cell.com/cms/10.1016/j.celrep.2019.02.031/attachment/59044211-fc55-4937-823b-adae28b05926/mmc3.xlsx)
+
+
+
+Epi.Cheng_Top_200 <-read.table("C:/Users/arik/SMART-seq2_RtL_embryoids/Epi.Cheng_Top_200.csv", sep="\t",stringsAsFactors = FALSE)
+
+ExE.Cheng_Top_200 <-read.table("C:/Users/arik/SMART-seq2_RtL_embryoids/ExE.Cheng_Top_200.csv", sep="\t",stringsAsFactors = FALSE)
+
+VE.Cheng_Top_200 <-read.table("C:/Users/arik/SMART-seq2_RtL_embryoids/VE.Cheng_Top_200.csv", sep="\t",stringsAsFactors = FALSE)
+
+
+Epi.Cheng_Top_200 <-Epi.Cheng_Top_200$V1
+
+ExE.Cheng_Top_200 <-ExE.Cheng_Top_200$V1
+
+VE.Cheng_Top_200 <-VE.Cheng_Top_200$V1
+
+
+Cheng.Top_200<-list()
+
+Cheng.Top_200[[1]]< -Epi.Cheng_Top_200
+Cheng.Top_200[[2]]<- ExE.Cheng_Top_200
+Cheng.Top_200[[3]]<- VE.Cheng_Top_200
+
+names(Cheng.Top_200)<-c("Epi-Signatures","ExE-Signatures","VE-Signatures")
+
+### Calculate a matrix with an AUC score for each gene-set in each cell and plots the AUC scores for all clusters as a violin plot
+
+cells_AUC <- AUCell_calcAUC(Cheng.Top_200, Aucell_Seurat_RtL_Embryoid_matrix, aucMaxRank = ceiling(0.1 * nrow(Aucell_Seurat_RtL_Embryoid_matrix)), normAUC = T,nCores=1)
+for (i in names(Cheng.Top_200)) {
+  tmp <- getAUC(cells_AUC)
+  tmp <- as.data.frame(t(tmp))
+  
+  df <- data.frame(row.names = row.names(Seurat_RtL_Embryoid@meta.data), cluster =
+                     as.character(Seurat_RtL_Embryoid$RNA_snn_res.0.2), stringsAsFactors = F)
+                
+  df <- as.data.frame(merge(df, tmp, by = 0))
+  rownames(df)<-df$Row.names
+  df<-df[,c("cluster",i),drop=F]
+  names(df)<-c("cluster","geneSet")
+  df %>% dplyr::group_by(cluster) %>% dplyr::summarize(Mean = mean(geneSet, na.rm=TRUE)) -> df.tmp
+  df.tmp$Mean <- scale(df.tmp$Mean)
+  df <- merge(df, df.tmp, key = "cluster", all = T)
+  
+  df <- df[grep("mix", df$cluster, invert = T),]
+  gg <- ggplot(df, aes(y = geneSet, x = cluster, group = cluster, fill = Mean)) + 
+    geom_violin(scale = "area", trim = T, adjust = 3, draw_quantiles = c(0.25, 0.5, 0.75), color = "grey30") +
+    scale_fill_gradient2(low="#4575B4", mid="#F1E8BC",high="#D73027") +
+    ylab("AUC score") + xlab("cluster") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          panel.background = element_blank(),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          axis.line.x = element_line(color="black", size = .3),
+          axis.line.y = element_line(color="black", size = .3))+ggtitle(paste(i))
+  plot(gg)+ggtitle(paste(i))}
+
+```
+
+### Code for Integration of the reference datasets, Label transfer and Confusion matrix (Figure 2F,S2H, Fig.2F)
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, warning = F, message = F)
+```
+
+
+```{r, message=F, warning=F}
+# Settings for parallel computing
+set.seed(42)
+plan("multiprocess", workers = 4)
+options(future.globals.maxSize = 500000 * 1024^2)
+```
+
+# Preparation of a combined reference dataset based on Posfai et al., 2021
+
+
+## Load combined reference from Posfai
+```{r, message=F}
+load("Figure6.Object2.Robj")
+seurat_posfai <- Figure6.Object
+rm(Figure6.Object)
+seurat_posfai <- UpdateSeuratObject(seurat_posfai)
+seurat_posfai
+```
+Included datasets
+```{r}
+# Rename resource3 - current study
+Idents(seurat_posfai) <- "resource3"
+seurat_posfai <- RenameIdents(seurat_posfai, "Current Study" = "Posfai et al., 2021")
+seurat_posfai$resource3 <- Idents(seurat_posfai)
+table(seurat_posfai$resource3)
+```
+
+```{r}
+colors_dataset_posfai <- c("Chen et al., 2016" = "#374E55B2",
+                           "Posfai et al., 2021"= "#DF8F44B2",
+                           "Li et al., 2019" = "#00A1D5B2",
+                           "Liu et al., 2017" = "#B24745B2",
+                           "Mohammed et al., 2017" = "#6A6599B2",
+                           "Pijuan-Sala et al., 2019" = "#79AF97B2",
+                           "Posfai et al., 2017" = "#80796BB2" ,
+                           "Sozen et al., 2019" = "#3B3B3BFF")
+
+colors_anno_posfai <- c(# Stem cells
+                        "2i" = "#6BBD42",
+                        "Liu EPSCs" = "#E72929", 
+                        "L.EPSCs" = "#8452A5",
+                        "D.EPSCs" = "#4252AD",
+                        # "EpiSCs"
+                        "Primed" = "#F7E731",
+  
+                        # Blastoids
+                        "B.Blastoid EPI" = "#A5DEC6",
+                        "B.Blastoid PE" = "#8CCE84",
+                        "B.Blastoid TE" = "#528C52",
+                        "B.Blastoid.Int.1" = "#84CE8C",
+                        "B.Blastoid.Int.2" = "#A5D68C",
+                        "ZG.Blastoid.EPI" = "#39317B",
+                        "ZG.Blastoid.Int.1" = "#D6F7F7",
+                        "ZG.Blastoid.PE" = "#7394CE",
+                        "ZG.Blastoid.TE" = "#4284BD",
+                        
+                        # Preimplantation and epiblast development
+                        "Morula" = "#FFD610",
+                        "ICM" = "#6BBDE7",
+                        "TE" = "#F7846B",
+                        "PE" = "#D6187B",
+                        "EPI E4.5" = "#BD3939",
+                        "EPI E5.5" = "#F7634A",
+                        "EPI E6.5-E7.5" = "#F7A529",
+                        
+                        # Other lineages
+                        "Allantois" = "#FFA552", 
+                        "Anterior Primitive Streak" = "#F7EFE7",
+                        "Caudal epiblast" = "#9CD6D6",
+                        "Caudal Mesoderm" = "#EF6342",
+                        "Caudal neurectoderm" = "#FFE7EF", 
+                        "Endothelium" = "#CE84BD",
+                        "ExE ectoderm" = "#CECECE", 
+                        "ExE endoderm" = "#F784AD",
+                        "ExE mesoderm" = "#7373B5",
+                        "Intermediate mesoderm" = "#9C84C6",
+                        "Mesenchyme" = "#EF529C", 
+                        "Mixed mesoderm" = "#D694C6",
+                        "Nascent mesoderm" = "#7B73BD",
+                        "Notochord" = "#BDE7E7",
+                        "Paraxial mesoderm" = "#B53163",
+                        "Parietal endoderm" = "#EF428C",
+                        "PGC" = "#8C8C31",
+                        "Primitive Streak" = "#BD8C31",
+                        "Rostral neurectoderm" = "#39BDCE",
+                        "Somitic mesoderm" = "#FFDEBD",
+                        "Visceral endoderm" = "#DEC6DE")
+
+
+seurat_posfai$Figure <- factor(seurat_posfai$Figure,levels = c(# Stem cells
+                                                                "2i",
+                                                                "Liu EPSCs", 
+                                                                "L.EPSCs",
+                                                                "D.EPSCs" ,
+                                                                # "EpiSCs"
+                                                                "Primed",
+                                          
+                                                                # Blastoids
+                                                                "B.Blastoid EPI",
+                                                                "B.Blastoid PE",
+                                                                "B.Blastoid TE",
+                                                                "B.Blastoid.Int.1",
+                                                                "B.Blastoid.Int.2",
+                                                                "ZG.Blastoid.EPI",
+                                                                "ZG.Blastoid.Int.1",
+                                                                "ZG.Blastoid.PE",
+                                                                "ZG.Blastoid.TE",
+                                                                
+                                                                # Preimplantation and epiblast development
+                                                                "Morula",
+                                                                "ICM",
+                                                                "TE",
+                                                                "PE",
+                                                                "EPI E4.5",
+                                                                "EPI E5.5",
+                                                                "EPI E6.5-E7.5",
+                                                                
+                                                                # Other lineages
+                                                                "Allantois", 
+                                                                "Anterior Primitive Streak",
+                                                                "Caudal epiblast",
+                                                                "Caudal Mesoderm",
+                                                                "Caudal neurectoderm", 
+                                                                "Endothelium",
+                                                                "ExE ectoderm", 
+                                                                "ExE endoderm",
+                                                                "ExE mesoderm",
+                                                                "Intermediate mesoderm",
+                                                                "Mesenchyme", 
+                                                                "Mixed mesoderm",
+                                                                "Nascent mesoderm",
+                                                                "Notochord",
+                                                                "Paraxial mesoderm",
+                                                                "Parietal endoderm",
+                                                                "PGC",
+                                                                "Primitive Streak",
+                                                                "Rostral neurectoderm",
+                                                                "Somitic mesoderm",
+                                                                "Visceral endoderm"))
+
+```
+
+
+
+## Subset on non-artificial references
+
+Select datasets of interest
+```{r}
+datasets.keep <- c( "Chen et al., 2016", "Mohammed et al., 2017", "Pijuan-Sala et al., 2019", "Posfai et al., 2017")
+Idents(seurat_posfai) <- "resource3"
+seurat.posfai.subset <- subset(seurat_posfai, idents = datasets.keep)
+table(seurat.posfai.subset$resource3)
+```
+
+Exclude '2i' and 'primed' from Chen dataset
+```{r}
+Idents(seurat.posfai.subset) <- "Figure"
+seurat.posfai.subset <- subset(seurat.posfai.subset, idents = c("2i", "Primed"), invert = T)
+table(seurat.posfai.subset$Figure)
+table(seurat.posfai.subset$resource3)
+```
+
+
+```{r}
+seurat.posfai.subset$Figure <- factor(seurat.posfai.subset$Figure,
+                                      levels = c(# Stem cells
+                                                  "2i",
+                                                  "Liu EPSCs", 
+                                                  "L.EPSCs",
+                                                  "D.EPSCs" ,
+                                                  # "EpiSCs"
+                                                  "Primed",
+                            
+                                                  # Blastoids
+                                                  "B.Blastoid EPI",
+                                                  "B.Blastoid PE",
+                                                  "B.Blastoid TE",
+                                                  "B.Blastoid.Int.1",
+                                                  "B.Blastoid.Int.2",
+                                                  "ZG.Blastoid.EPI",
+                                                  "ZG.Blastoid.Int.1",
+                                                  "ZG.Blastoid.PE",
+                                                  "ZG.Blastoid.TE",
+                                                  
+                                                  # Preimplantation and epiblast development
+                                                  "Morula",
+                                                  "ICM",
+                                                  "TE",
+                                                  "PE",
+                                                  "EPI E4.5",
+                                                  "EPI E5.5",
+                                                  "EPI E6.5-E7.5",
+                                                  
+                                                  # Other lineages
+                                                  "Allantois", 
+                                                  "Anterior Primitive Streak",
+                                                  "Caudal epiblast",
+                                                  "Caudal Mesoderm",
+                                                  "Caudal neurectoderm", 
+                                                  "Endothelium",
+                                                  "ExE ectoderm", 
+                                                  "ExE endoderm",
+                                                  "ExE mesoderm",
+                                                  "Intermediate mesoderm",
+                                                  "Mesenchyme", 
+                                                  "Mixed mesoderm",
+                                                  "Nascent mesoderm",
+                                                  "Notochord",
+                                                  "Paraxial mesoderm",
+                                                  "Parietal endoderm",
+                                                  "PGC",
+                                                  "Primitive Streak",
+                                                  "Rostral neurectoderm",
+                                                  "Somitic mesoderm",
+                                                  "Visceral endoderm"))
+```
+
+
+## Visualization of original UMAP
+
+Colored by cell identity
+```{r, fig.height=8, fig.width=20}
+p1 <- DimPlot(seurat_posfai, group.by = "Figure", label = T, repel = T, cols = colors_anno_posfai) + 
+  coord_fixed() +  NoLegend() + ggtitle("Original UMAP (Posfai)")
+p2 <- DimPlot(seurat.posfai.subset, group.by = "Figure",  label = T, repel = T, cols = colors_anno_posfai) + 
+  coord_fixed() + ggtitle("Subsetted UMAP (Posfai)")
+p1 + p2 + plot_layout(ncol = 2)
+```
+
+
+## Integration of subsetted dataset
+
+```{r, warning = F}
+# split the dataset into a list of seurat objects
+seurat.posfai.subset.list <- SplitObject(seurat.posfai.subset, split.by = "resource3")
+
+# normalize and identify variable features for each dataset independently
+seurat.posfai.subset.list <- lapply(X = seurat.posfai.subset.list, FUN = function(x) {
+    x <- NormalizeData(x)
+    x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000)
+})
+
+# select features that are repeatedly variable across datasets for integration run PCA on each dataset using these features
+features <- SelectIntegrationFeatures(object.list = seurat.posfai.subset.list)
+
+seurat.posfai.subset.list <- lapply(X = seurat.posfai.subset.list, FUN = function(x) {
+    x <- ScaleData(x, features = features, verbose = F)
+    x <- RunPCA(x, features = features, verbose = F, npcs = 45)
+})
+```
+
+```{r, message=F, warning=F}
+# Identify anchors
+anchors.integration <- FindIntegrationAnchors(object.list = seurat.posfai.subset.list , 
+                                              anchor.features = features,
+                                              reduction = "rpca",
+                                              normalization.method = "LogNormalize",
+                                              k.anchor = 20)
+# Integrate datasets
+posfai.subset.integrated <- IntegrateData(anchorset = anchors.integration,   
+                                          normalization.method = "LogNormalize",
+                                          k.weight = 45,
+                                          verbose = T)
+```
+
+```{r, message=F, warning=F}
+# Standard seurat workflow on integrated dataset
+DefaultAssay(posfai.subset.integrated) <- "integrated"
+
+posfai.subset.integrated <- ScaleData(posfai.subset.integrated, verbose = F)
+posfai.subset.integrated <- RunPCA(posfai.subset.integrated, verbose = F)
+posfai.subset.integrated <- RunUMAP(posfai.subset.integrated, reduction = "pca", dims = 1:5, return.model = T)
+```
+
+UMAP visualization
+```{r, fig.height=8, fig.width=20}
+p1 <- DimPlot(posfai.subset.integrated, reduction = "umap", group.by = "Figure", label = T, repel = T, 
+        cols = colors_anno_posfai, label.size = 3, pt.size = 1) + coord_fixed() + ggtitle("Integrated reference datasets")
+p2 <- DimPlot(posfai.subset.integrated, reduction = "umap", group.by = "resource3", cols = colors_dataset_posfai, pt.size = 1) +
+  coord_fixed() + ggtitle("Integrated reference datasets")
+p1 + p2 + plot_layout(ncol = 2)
+```
+
+
+
+# Current study data
+
+```{r, message=F}
+#Update to R4/ Seurat V4
+seurat <- UpdateSeuratObject(Seurat_RtL_Embryoid)
+seurat$resource3 <- "Current study"
+```
+
+```{r}
+colors_cluster <- c("Epi_like_cells"     = "#B1E096",
+                    "ExE_like_cells"     = "#FEBAA5",
+                    "VE_like_cells"      = "#B5F7FF")
+
+#colors_subcluster <- c("EmVE" = "#00BFC4",
+#                       "Epi_Naive" = "#40914B", 
+#                       "Epi_PGC" = "#BFE879", 
+#                       "Epi_Primed" = "#0FFF3F", 
+#                       "ExE_Subcluster1" = "#FFAD42",
+#                       "ExE_Subcluster2" = "#EB2315", 
+#                       "ExVE" = "#605AA1")
+```
+
+
+UMAP visualization
+```{r, fig.height=6, fig.width=12}
+p1 <- DimPlot(seurat, group.by = "cluster_ident", cols = colors_cluster) + coord_fixed() + ggtitle("Rough labeling")
+#p2 <- DimPlot(seurat, group.by = "Subcluster_ident", cols = colors_subcluster) + coord_fixed() + ggtitle("Fine labeling")
+p1 + plot_layout(ncol=1)
+```
+
+
+# Label transfer between reference datasets and current study dataset
+
+```{r}
+colors_dataset_posfai <- c("Chen et al., 2016" = "#374E55B2",
+                           "Posfai et al., 2021"= "#DF8F44B2",
+                           "Li et al., 2019" = "#00A1D5B2",
+                           "Liu et al., 2017" = "#B24745B2",
+                           "Mohammed et al., 2017" = "#6A6599B2",
+                           "Pijuan-Sala et al., 2019" = "#79AF97B2",
+                           "Posfai et al., 2017" = "#80796BB2" ,
+                           "Sozen et al., 2019" = "#3B3B3BFF", 
+                           "Current study" = "#A73030FF")
+```
+
+
+```{r, message=F}
+DefaultAssay(posfai.subset.integrated) <- "integrated"
+
+anchors <- FindTransferAnchors(
+  reference = posfai.subset.integrated,
+  query = seurat,
+  normalization.method = "LogNormalize",
+  reference.assay = "integrated",
+  reference.reduction = "pca",
+  dims = 1:50
+)
+```
+
+
+```{r, message=F, warning=F}
+plan("multiprocess", workers = 20)
+
+seurat <- MapQuery(
+  anchorset = anchors,
+  query = seurat,
+  reference = posfai.subset.integrated,
+  refdata = list(celltype = "Figure"),
+  reference.reduction = "pca",
+  reduction.model = "umap",
+  new.reduction.name = "ref.pca"
+)
+
+plan("multiprocess", workers = 4)
+```
+
+## UMAP visualization
+
+Current study data mapped on reference UMAP
+
+```{r, fig.height=10, fig.width=20}
+p1 <- DimPlot(posfai.subset.integrated, reduction = "umap", group.by = "Figure", label = TRUE, label.size = 4, 
+              repel = TRUE, cols = colors_anno_posfai) + NoLegend() + 
+  ggtitle("Reference annotations (Posfai subset") + xlim(-15, 10) + ylim(-15, 10) + coord_fixed()
+
+p2 <- DimPlot(seurat, reduction = "ref.umap", group.by = "predicted.celltype", label = TRUE, label.size = 4, 
+              repel = TRUE, cols = colors_anno_posfai) + NoLegend() + 
+  ggtitle("Query transferred labels (Current study)") + xlim(-15, 10) + ylim(-15, 10)+ coord_fixed()
+
+p1 + p2 + plot_layout(ncol=2)
+```
+
+
+```{r, fig.height=10, fig.width=20}
+p1 <- DimPlot(seurat, reduction = "ref.umap", group.by = "cluster_ident", label = TRUE, label.size = 4, 
+              repel = TRUE,  cols = colors_cluster) + 
+  ggtitle("Current study mapped on reference UMA (rough labels)") + coord_fixed() + xlim(-15, 10) + ylim(-15, 10)
+
+#p2 <- DimPlot(seurat, reduction = "ref.umap", group.by = "Subcluster_ident", label = TRUE, label.size = 4, 
+#              repel = TRUE, cols = colors_subcluster) +
+#  ggtitle("Current study mapped on reference UMA (fine labels)") + coord_fixed() + xlim(-15, 10) + ylim(-15, 10)
+
+p1 + plot_layout(ncol = 2)
+```
+
+
+## De novo calculation of a UMAP on the merged reference and current study dataset
+
+de novo calculated UMAP colored by current study dataset and integrated reference datasets
+```{r, fig.height=6, fig.width=8, message=F}
+posfai.subset.integrated$id <- 'reference'
+seurat$id <- 'query'
+dataset.merged <- merge(posfai.subset.integrated, seurat)
+dataset.merged[["pca"]] <- merge(posfai.subset.integrated[["pca"]], seurat[["ref.pca"]])
+dataset.merged <- RunUMAP(dataset.merged, reduction = 'pca', dims = 1:5)
+DimPlot(dataset.merged, group.by = 'id', shuffle = TRUE, cols = c("#A73030FF", "darkgrey")) + coord_fixed() + ggtitle("")
+```
+
+de novo calculated UMAP colored by reference
+```{r, fig.height=6, fig.width=8}
+DimPlot(dataset.merged, group.by = "resource3", cols = colors_dataset_posfai) + ggtitle("") + coord_fixed()
+# ggsave(filename = "Merged_UMAP_dataset.pdf", device = cairo_pdf, dpi = "print", height = 8, width = 12)
+```
+
+```{r}
+colors_merged <- c(colors_anno_posfai, colors_cluster)
+#colors_merged_fine <- c(colors_anno_posfai, colors_subcluster)
+```
+
+```{r}
+# combine cell annotations from reference and current study
+dataset.merged$celltype.final <- dataset.merged$Figure
+dataset.merged$celltype.final[is.na(dataset.merged$celltype.final)] <-
+  dataset.merged$cluster_ident[is.na(dataset.merged$celltype.final)]
+
+#dataset.merged$celltype.final.fine <- dataset.merged$Figure
+#dataset.merged$celltype.final.fine[is.na(dataset.merged$celltype.final.fine)] <-
+#dataset.merged$Subcluster_ident[is.na(dataset.merged$celltype.final.fine)]
+```
+
+```{r}
+dataset.merged$celltype.final <- factor(dataset.merged$celltype.final,
+                                      levels = c(#current study
+                                                 "VE_like_cells", 
+                                                 "Epi_like_cells",
+                                                 "ExE_like_cells",
+                                        
+                                                  # Stem cells
+                                                  "2i",
+                                                  "Liu EPSCs", 
+                                                  "L.EPSCs",
+                                                  "D.EPSCs" ,
+                                                  # "EpiSCs"
+                                                  "Primed",
+                            
+                                                  # Blastoids
+                                                  "B.Blastoid EPI",
+                                                  "B.Blastoid PE",
+                                                  "B.Blastoid TE",
+                                                  "B.Blastoid.Int.1",
+                                                  "B.Blastoid.Int.2",
+                                                  "ZG.Blastoid.EPI",
+                                                  "ZG.Blastoid.Int.1",
+                                                  "ZG.Blastoid.PE",
+                                                  "ZG.Blastoid.TE",
+                                                  
+                                                  # Preimplantation and epiblast development
+                                                  "Morula",
+                                                  "ICM",
+                                                  "TE",
+                                                  "PE",
+                                                  "EPI E4.5",
+                                                  "EPI E5.5",
+                                                  "EPI E6.5-E7.5",
+                                                  
+                                                  # Other lineages
+                                                  "Allantois", 
+                                                  "Anterior Primitive Streak",
+                                                  "Caudal epiblast",
+                                                  "Caudal Mesoderm",
+                                                  "Caudal neurectoderm", 
+                                                  "Endothelium",
+                                                  "ExE ectoderm", 
+                                                  "ExE endoderm",
+                                                  "ExE mesoderm",
+                                                  "Intermediate mesoderm",
+                                                  "Mesenchyme", 
+                                                  "Mixed mesoderm",
+                                                  "Nascent mesoderm",
+                                                  "Notochord",
+                                                  "Paraxial mesoderm",
+                                                  "Parietal endoderm",
+                                                  "PGC",
+                                                  "Primitive Streak",
+                                                  "Rostral neurectoderm",
+                                                  "Somitic mesoderm",
+                                                  "Visceral endoderm"))
+```
+
+de novo calculated UMAP colored by cell identity
+```{r, fig.height=20, fig.width=15}
+p1 <- DimPlot(dataset.merged, group.by = "celltype.final", label = T, repel = T, cols = colors_merged) + 
+  coord_fixed() + ggtitle("Merged dataset (rough labeling)")
+
+#p2 <- DimPlot(dataset.merged, group.by = "celltype.final.fine", label = T, repel = T, cols = colors_merged_fine)+ 
+#  coord_fixed() + ggtitle("Merged dataset (rough labeling)")
+p1 + plot_layout(ncol=1)
+```
+
+
+### Figure S2H UMAP from Fig. 2F identifying original datasets for each cell.
+
+```{r, fig.height=7, fig.width=15}
+p1 <- DimPlot(seurat.posfai.subset,group.by = "resource3", cols = colors_dataset_posfai) + 
+  coord_fixed() + ggtitle("Subsetted UMAP (Posfai)")
+
+p1 + plot_layout(ncol = 1)
+```
+
+
+### Figure S2I Heatmap of cell percentages from RtL-embryo clusters mapped to the respective cells in the reference dataset of Fig. 2F
+
+```{r}
+
+#Confusion matrix The confusion matrix shows the percentage of cells of the current study mapped to respecitve cell types in the reference
+
+confusionMatrix <- function (i = NULL, j = NULL)
+{
+  ui <- unique(i)
+  uj <- unique(j)
+  m <- Matrix::sparseMatrix(i = match(i, ui), j = match(j,
+    uj), x = rep(1, length(i)), dims = c(length(ui), length(uj)))
+  rownames(m) <- ui
+  colnames(m) <- uj
+  m
+}
+```
+
+### Rough labelingof Figure S2I
+
+```{r, fig.width=8, fig.height=6}
+# quantify cells of each sample per cluster
+cells_cluster <- confusionMatrix(paste0(seurat$cluster_ident), paste0(seurat$predicted.celltype))
+cells_cluster <- cells_cluster[order(factor(rownames(cells_cluster), levels=c(0:nrow(cells_cluster)))), ]
+
+# calculate percentage of cells from cell type per cluster
+scaled_cM <- as.matrix(round((cells_cluster / Matrix::rowSums(cells_cluster))*100,2))
+
+# Order cell types
+scaled_cM <- scaled_cM[c("VE_like_cells", "Epi_like_cells", "ExE_like_cells"),
+                       c("PE", "Visceral endoderm", "EPI E4.5", "EPI E5.5", "ExE ectoderm", "TE")]
+
+pheatmap::pheatmap(
+  mat = as.matrix(scaled_cM),
+  border_color = "black",
+  color = colorRampPalette(colors = c("#4575B4","#F1E8BC", "#D73027"))(100),
+  display_numbers = TRUE,
+  number_color = "black",
+  cluster_cols=F,
+  cluster_rows = F,
+  cellwidth = 70,
+  cellheight = 70,
+  fontsize = 12
+)
+```
+
+### Figure S2J UMAP of scRNA-seq data of 3D and 2D reprograming
+
+```{r}
+
+Idents(Seurat_3D_RtL_Embrioid_2D_culture) <- "cluster_ident"
+
+DimPlot(object = Seurat_3D_RtL_Embrioid_2D_culture, reduction = 'umap')
+
+```
+
+### Figure 2G  AUCell-based enrichment scores comparing 3D and 2D gene signatures to natural murine clusters.
+
+```{r}
+
+
+# Call markers genes between 3D culture and 2D culture for 3D_VE, 3D_ExE, 3D_Epi, 2i_LIF_ESC, 2D_iTSC_gene, 2D_iXEN_gene.
+
+
+
+ExE_3D <-row.names(ExE_3D <-head(ExE_3D<-(FindMarkers(Seurat_3D_RtL_Embrioid_2D_culture, ident.1 = "3D_ExE", ident.2 = "2D_iTSC", only.pos = TRUE)), 200))
+
+ExE_2D <-row.names(ExE_2D <-head(ExE_2D<-(FindMarkers(Seurat_3D_RtL_Embrioid_2D_culture, ident.1 = "2D_iTSC", ident.2 = "3D_ExE", only.pos = TRUE)), 200))
+
+Epi_3D <-row.names(Epi_3D <-head(Epi_3D<-(FindMarkers(Seurat_3D_RtL_Embrioid_2D_culture, ident.1 = "3D_Epi", ident.2 = "2i_LIF_ESC", only.pos = TRUE)), 200))
+
+Epi_2D <-row.names(Epi_2D <-head(Epi_2D<-(FindMarkers(Seurat_3D_RtL_Embrioid_2D_culture, ident.1 = "2i_LIF_ESC", ident.2 = "3D_Epi", only.pos = TRUE)), 200))
+
+VE_3D <-row.names(VE_3D <-head(VE_3D<-(FindMarkers(Seurat_3D_RtL_Embrioid_2D_culture, ident.1 = "3D_VE", ident.2 = "2D_iXEN", only.pos = TRUE)), 200))
+
+VE_2D <-row.names(VE_2D <-head(VE_2D<-(FindMarkers(Seurat_3D_RtL_Embrioid_2D_culture, ident.1 = "2D_iXEN", ident.2 = "3D_VE", only.pos = TRUE)), 200))
+
+
+
+### create a List of 3D and 2D signatures.
+
+marker_genes_3D_2D_VE<-list()
+
+marker_genes_3D_2D_Epi<-list()
+
+marker_genes_3D_2D_ExE<-list()
+
+
+
+
+marker_genes_3D_2D_ExE[[1]]<-ExE_3D
+marker_genes_3D_2D_ExE[[2]]<-ExE_2D
+
+
+marker_genes_3D_2D_Epi[[1]]<-Epi_3D
+marker_genes_3D_2D_Epi[[2]]<-Epi_2D
+
+marker_genes_3D_2D_VE[[1]]<-VE_3D
+marker_genes_3D_2D_VE[[2]]<-VE_2D
+
+names(marker_genes_3D_2D_ExE)<-c("3D_ExE_gene","marker_2D_iTSC_gene")
+
+names(marker_genes_3D_2D_Epi)<-c("3D_Epi_gene","marker_2D_2i_LIF_ESC_gene")
+
+names(marker_genes_3D_2D_VE)<-c("3D_VE_gene","marker_2D_iXEN_gene")
+
+```
+
+### Subset seurat.posfai.subset for AUC
+
+```{r}
+
+seurat.posfai.subset_3D_2D_VE <- subset(seurat.posfai.subset, idents = c("PE", "TE","Visceral endoderm")
+
+seurat.posfai.subset_3D_2D_Epi <- subset(seurat.posfai.subset, idents = c("EPI E4.5", "EPI E5.5", "ICM")
+
+seurat.posfai.subset_3D_2D_ExE <- subset(seurat.posfai.subset, idents = c("EPI E4.5", "EPI E5.5", "ExE ectoderm")
+                                         
+```                                         
+                                         
+### Build  expression-based ranking for all the genes in each cell
+```{r}
+#seurat.posfai.subset_3D_2D_VE
+
+seurat.posfai.subset_3D_2D_VE_matrix <-as.data.frame(as.matrix(seurat.posfai.subset_3D_2D_VE@assays$RNA@data))
+
+filtered_matrix<-rowSums(seurat.posfai.subset_3D_2D_VE_matrix > 0)
+
+filtered_matrix<-filtered_matrix[filtered_matrix>10]
+
+seurat.posfai.subset_3D_2D_VE_matrix <- seurat.posfai.subset_3D_2D_VE_matrix[row.names(seurat.posfai.subset_3D_2D_VE_matrix) %in% names(filtered_matrix),]
+
+Aucell_seurat.posfai.subset_3D_2D_VE_matrix <- AUCell_buildRankings(as.matrix(seurat.posfai.subset_3D_2D_VE_matrix),nCores = 30)
+
+#seurat.posfai.subset_3D_2D_Epi
+
+seurat.posfai.subset_3D_2D_Epi_matrix <-as.data.frame(as.matrix(seurat.posfai.subset_3D_2D_Epi@assays$RNA@data))
+
+filtered_matrix<-rowSums(seurat.posfai.subset_3D_2D_Epi_matrix > 0)
+
+filtered_matrix<-filtered_matrix[filtered_matrix>10]
+
+seurat.posfai.subset_3D_2D_Epi_matrix <- seurat.posfai.subset_3D_2D_Epi_matrix[row.names(seurat.posfai.subset_3D_2D_Epi_matrix) %in% names(filtered_matrix),]
+
+Aucell_seurat.posfai.subset_3D_2D_Epi_matrix <- AUCell_buildRankings(as.matrix(seurat.posfai.subset_3D_2D_Epi_matrix),nCores = 30)
+
+#seurat.posfai.subset_3D_2D_ExE
+
+seurat.posfai.subset_3D_2D_ExE_matrix <-as.data.frame(as.matrix(seurat.posfai.subset_3D_2D_ExE@assays$RNA@data))
+
+filtered_matrix<-rowSums(seurat.posfai.subset_3D_2D_ExE_matrix > 0)
+
+filtered_matrix<-filtered_matrix[filtered_matrix>10]
+
+seurat.posfai.subset_3D_2D_ExE_matrix <- seurat.posfai.subset_3D_2D_ExE_matrix[row.names(seurat.posfai.subset_3D_2D_ExE_matrix) %in% names(filtered_matrix),]
+
+Aucell_seurat.posfai.subset_3D_2D_ExE_matrix <- AUCell_buildRankings(as.matrix(seurat.posfai.subset_3D_2D_ExE_matrix),nCores = 30)
+
+``` 
+
+
+
+### Calculate a matrix with an AUC score for each gene-set in each cell and plots the AUC scores for all clusters as a violin plot
+
+
+
+```{r}
+#3D co-culture VE-like cell signature and their 2D induced equivalent 2D-iXEN signatures mapped to natural  "PE", "TE","Visceral endoderm"
+
+cells_AUC <- AUCell_calcAUC(marker_genes_3D_2D_VE, Aucell_seurat.posfai.subset_3D_2D_ExE_matrix, aucMaxRank = ceiling(0.1 * nrow(Aucell_seurat.posfai.subset_3D_2D_ExE_matrix)), normAUC = T,nCores=1)
+for (i in names(marker_genes_3D_2D_VE)) {
+  tmp <- getAUC(cells_AUC)
+  tmp <- as.data.frame(t(tmp))
+  
+  df <- data.frame(row.names = row.names(seurat.posfai.subset_3D_2D_VE@meta.data), cluster =
+                     as.character(seurat.posfai.subset_3D_2D_VE$Figure), stringsAsFactors = F)
+                
+  df <- as.data.frame(merge(df, tmp, by = 0))
+  rownames(df)<-df$Row.names
+  df<-df[,c("cluster",i),drop=F]
+  names(df)<-c("cluster","geneSet")
+  df %>% dplyr::group_by(cluster) %>% dplyr::summarize(Mean = mean(geneSet, na.rm=TRUE)) -> df.tmp
+  df.tmp$Mean <- scale(df.tmp$Mean)
+  df <- merge(df, df.tmp, key = "cluster", all = T)
+  
+  df <- df[grep("mix", df$cluster, invert = T),]
+  gg <- ggplot(df, aes(y = geneSet, x = cluster, group = cluster, fill = Mean)) + 
+    geom_violin(scale = "area", trim = T, adjust = 3, draw_quantiles = c(0.25, 0.5, 0.75), color = "grey30") +
+    scale_fill_gradient2(low="#4575B4", mid="#F1E8BC",high="#D73027") +
+    ylab("AUC score") + xlab("cluster") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          panel.background = element_blank(),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          axis.line.x = element_line(color="black", size = .3),
+          axis.line.y = element_line(color="black", size = .3))+ggtitle(paste(i))
+  plot(gg)+ggtitle(paste(i))}
+
+```
+
+
+```{r}
+#3D co-culture Epi-like cell signature and their 2D induced equivalent 2D-2i/LIF ESC signatures mapped to natural  "EPI E4.5", "EPI E5.5", "ICM"
+
+cells_AUC <- AUCell_calcAUC(marker_genes_3D_2D_Epi, Aucell_seurat.posfai.subset_3D_2D_Epi_matrix, aucMaxRank = ceiling(0.1 * nrow(Aucell_seurat.posfai.subset_3D_2D_Epi_matrix)), normAUC = T,nCores=1)
+for (i in names(marker_genes_3D_2D_Epi)) {
+  tmp <- getAUC(cells_AUC)
+  tmp <- as.data.frame(t(tmp))
+  
+  df <- data.frame(row.names = row.names(seurat.posfai.subset_3D_2D_Epi@meta.data), cluster =
+                       as.character(seurat.posfai.subset_3D_2D_Epi$Figure), stringsAsFactors = F)
+                
+  df <- as.data.frame(merge(df, tmp, by = 0))
+  rownames(df)<-df$Row.names
+  df<-df[,c("cluster",i),drop=F]
+  names(df)<-c("cluster","geneSet")
+  df %>% dplyr::group_by(cluster) %>% dplyr::summarize(Mean = mean(geneSet, na.rm=TRUE)) -> df.tmp
+  df.tmp$Mean <- scale(df.tmp$Mean)
+  df <- merge(df, df.tmp, key = "cluster", all = T)
+  
+  df <- df[grep("mix", df$cluster, invert = T),]
+  gg <- ggplot(df, aes(y = geneSet, x = cluster, group = cluster, fill = Mean)) + 
+    geom_violin(scale = "area", trim = T, adjust = 3, draw_quantiles = c(0.25, 0.5, 0.75), color = "grey30") +
+    scale_fill_gradient2(low="#4575B4", mid="#F1E8BC",high="#D73027") +
+    ylab("AUC score") + xlab("cluster") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          panel.background = element_blank(),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          axis.line.x = element_line(color="black", size = .3),
+          axis.line.y = element_line(color="black", size = .3))+ggtitle(paste(i))
+  plot(gg)+ggtitle(paste(i))}
+
+```
+
+```{r}
+#3D co-culture ExE-like cell signature and their 2D induced equivalent 2D-iTSC signatures mapped to natural  "EPI E4.5", "EPI E5.5", "ExE ectoderm"
+
+cells_AUC <- AUCell_calcAUC(marker_genes_3D_2D_ExE, Aucell_seurat.posfai.subset_3D_2D_ExE_matrix, aucMaxRank = ceiling(0.1 * nrow(Aucell_seurat.posfai.subset_3D_2D_ExE_matrix)), normAUC = T,nCores=1)
+for (i in names(marker_genes_3D_2D_ExE)) {
+  tmp <- getAUC(cells_AUC)
+  tmp <- as.data.frame(t(tmp))
+  
+  df <- data.frame(row.names = row.names(seurat.posfai.subset_3D_2D_ExE@meta.data), cluster =
+                     as.character(seurat.posfai.subset_3D_2D_ExE$Figure), stringsAsFactors = F)
+                
+  df <- as.data.frame(merge(df, tmp, by = 0))
+  rownames(df)<-df$Row.names
+  df<-df[,c("cluster",i),drop=F]
+  names(df)<-c("cluster","geneSet")
+  df %>% dplyr::group_by(cluster) %>% dplyr::summarize(Mean = mean(geneSet, na.rm=TRUE)) -> df.tmp
+  df.tmp$Mean <- scale(df.tmp$Mean)
+  df <- merge(df, df.tmp, key = "cluster", all = T)
+  
+  df <- df[grep("mix", df$cluster, invert = T),]
+  gg <- ggplot(df, aes(y = geneSet, x = cluster, group = cluster, fill = Mean)) + 
+    geom_violin(scale = "area", trim = T, adjust = 3, draw_quantiles = c(0.25, 0.5, 0.75), color = "grey30") +
+    scale_fill_gradient2(low="#4575B4", mid="#F1E8BC",high="#D73027") +
+    ylab("AUC score") + xlab("cluster") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          panel.background = element_blank(),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          axis.line.x = element_line(color="black", size = .3),
+          axis.line.y = element_line(color="black", size = .3))+ggtitle(paste(i))
+  plot(gg)+ggtitle(paste(i))}
+
+```
+
+
+---
+title: "Fig3_S3"
+author: "Arik Horne"
+date: "15 September 2021"
+output: html_document
+---
+
+
+### We work with the Seurat objects Seurat_RtL_Embryoid (SMART-seq2 Data of RtL-Embrioids)
+
+
+
+### Clustering of VE-like subcluster 
+
+```{r}
+# Selecting VE-like subcluster  and subsetting the Seurat object
+
+Idents(Seurat_RtL_Embryoid) <- "cluster_ident"
+
+VE_sub <-subset(Seurat_RtL_Embryoid, idents = c("VE_like_cells"))
+
+```
+
+```{r}
+# ### Identification of highly variable features in VE-like subcluster
+
+VE_sub <- FindVariableFeatures(VE_sub, selection.method = "vst", nfeatures = 2000)
+
+```
+
+###  We apply a linear transformation to the Normalized data, this scales and centers the  features in the VE-like datasets
+
+```{r}
+
+all.genes <- rownames(x = VE_sub)
+
+VE_sub <- ScaleData(object = VE_sub, features = all.genes)
+
+```
+
+### Run a PCA dimensionality reduction scaled VE-like data
+
+```{r}
+
+VE_sub <- RunPCA(object = VE_sub, features = VariableFeatures(object = VE_sub),verbose = FALSE)
+
+```
+
+### Computes the k.param nearest neighbors for VE-like data and identify clusters of cells by a shared nearest neighbor (SNN)
+
+```{r}
+
+VE_sub <- FindNeighbors(VE_sub, dims = 1:4)
+
+VE_sub <- FindClusters(VE_sub, resolution = 0.2)
+
+```
+
+
+### Perform non-linear dimensional reduction (UMAP) to visualize and explore VE-like datasets. 
+auc
+```{r}
+
+VE_sub <- RunUMAP(VE_sub, dims = 1:4)
+
+```
+
+### Figure 3A) UMAP representation of VE-like cluster revealing two subclusters diverging in their transcriptional profile.
+
+```{r}
+
+Idents(VE_sub) <- "RNA_snn_res.0.2"
+
+DimPlot(object = VE_sub, reduction = 'umap')
+
+```
+
+
+### Figure 3B) AUCell-based enrichment scores (AUC scores) showing similarity of gene expression signatures of the two VE-like clusters compared to their respective natural counterparts as assessed by Cheng et al. 2019  
+
+```{r}
+
+### Build  expression-based ranking for all the genes in each cell
+
+VE_sub_matrix <-as.data.frame(as.matrix(VE_sub@assays$RNA@data))
+
+filtered_matrix<-rowSums(VE_sub_matrix > 0)
+
+filtered_matrix<-filtered_matrix[filtered_matrix>10]
+
+VE_sub_matrix <- VE_sub_matrix[row.names(VE_sub_matrix) %in% names(filtered_matrix),]
+
+Aucell_VE_sub_matrix <- AUCell_buildRankings(as.matrix(VE_sub_matrix),nCores = 30)
+
+### Create a List of Cheng et al. 2019 signatures for EmVE/ExVE . Link for signatures (https://www.cell.com/cms/10.1016/j.celrep.2019.02.031/attachment/013a572c-448f-4fc6-a2f1-a1c63f6acd2b/mmc9.xlsx)
+
+
+
+ExVE.Cheng_Signature <-read.table("C:/Users/arik/SMART-seq2_RtL_embryoids/ExVE.Cheng.csv", sep="\t",stringsAsFactors = FALSE)
+
+ExVE.Cheng_Signature <-ExVE.Cheng_Signature$V1
+
+
+ExVE.Cheng_Signature<-list()
+
+ExVE.Cheng_Signature[[1]]< -ExVE.Cheng_Signature
+
+names(ExVE.Cheng_Signature)<-c("ExVE.Cheng_Signature")
+
+### Calculate a matrix with an AUC score for each gene-set in each cell and plots the AUC scores for all clusters as a violin plot
+
+cells_AUC <- AUCell_calcAUC(ExVE.Cheng_Signature, Aucell_VE_sub_matrix, aucMaxRank = ceiling(0.1 * nrow(Aucell_VE_sub_matrix)), normAUC = T,nCores=1)
+for (i in names(ExVE.Cheng_Signature)) {
+  tmp <- getAUC(cells_AUC)
+  tmp <- as.data.frame(t(tmp))
+  
+  df <- data.frame(row.names = row.names(VE_sub@meta.data), cluster =
+                     as.character(VE_sub$RNA_snn_res.0.2), stringsAsFactors = F)
+                
+  df <- as.data.frame(merge(df, tmp, by = 0))
+  rownames(df)<-df$Row.names
+  df<-df[,c("cluster",i),drop=F]
+  names(df)<-c("cluster","geneSet")
+  df %>% dplyr::group_by(cluster) %>% dplyr::summarize(Mean = mean(geneSet, na.rm=TRUE)) -> df.tmp
+  df.tmp$Mean <- scale(df.tmp$Mean)
+  df <- merge(df, df.tmp, key = "cluster", all = T)
+  
+  df <- df[grep("mix", df$cluster, invert = T),]
+  gg <- ggplot(df, aes(y = geneSet, x = cluster, group = cluster, fill = Mean)) + 
+    geom_violin(scale = "area", trim = T, adjust = 3, draw_quantiles = c(0.25, 0.5, 0.75), color = "grey30") +
+    scale_fill_gradient2(low="#4575B4", mid="#F1E8BC",high="#D73027") +
+    ylab("AUC score") + xlab("cluster") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          panel.background = element_blank(),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          axis.line.x = element_line(color="black", size = .3),
+          axis.line.y = element_line(color="black", size = .3))+ggtitle(paste(i))
+  plot(gg)+ggtitle(paste(i))}
+
+```
+
+
+### Figure 3D) Analysis of AVE marker expression in VE-like subclusters displays higher expression of AVE marker gens inside the EmVE-like cell cluster.
+
+```{r}
+
+DotPlot(VE_sub, features= c("Lefty1","Nodal","Fgf5","Dkk1","Sfrp1","Lhx1","Sfrp5","H2afy2","Akr1c13"))+ scale_colour_gradient2(low = "#4575B4", mid = "#F1E8BC", high = "#D73027") 
+
+
+```
+
+
+### Figure 3E) AUCell-based enrichment scores (AUC scores) showing similarity of gene expression signatures of the two VE-like clusters compared to their respective natural counterparts as assessed by Cheng et al. 2019  
+
+```{r}
+
+### Build  expression-based ranking for all the genes in each cell
+
+VE_sub_matrix <-as.data.frame(as.matrix(VE_sub@assays$RNA@data))
+
+filtered_matrix<-rowSums(VE_sub_matrix > 0)
+
+filtered_matrix<-filtered_matrix[filtered_matrix>10]
+
+VE_sub_matrix <- VE_sub_matrix[row.names(VE_sub_matrix) %in% names(filtered_matrix),]
+
+Aucell_VE_sub_matrix <- AUCell_buildRankings(as.matrix(VE_sub_matrix),nCores = 30)
+
+### Create a List of Cheng et al. 2019 signatures for AVE . Link for signatures (https://www.cell.com/cms/10.1016/j.celrep.2019.02.031/attachment/013a572c-448f-4fc6-a2f1-a1c63f6acd2b/mmc9.xlsx)
+
+
+
+AVE.Cheng_Signature <-read.table("C:/Users/arik/SMART-seq2_RtL_embryoids/AVE.Cheng.csv", sep="\t",stringsAsFactors = FALSE)
+
+AVE.Cheng_Signature <-AVE.Cheng_Signature$V1
+
+
+AVE.Cheng_Signature<-list()
+
+AVE.Cheng_Signature[[1]]< -AVE.Cheng_Signature
+
+names(AVE.Cheng_Signature)<-c("AVE.Cheng_Signature")
+
+### Calculate a matrix with an AUC score for each gene-set in each cell and plots the AUC scores for all clusters as a violin plot
+
+cells_AUC <- AUCell_calcAUC(AVE.Cheng_Signature, Aucell_VE_sub_matrix, aucMaxRank = ceiling(0.1 * nrow(Aucell_VE_sub_matrix)), normAUC = T,nCores=1)
+for (i in names(AVE.Cheng_Signature)) {
+  tmp <- getAUC(cells_AUC)
+  tmp <- as.data.frame(t(tmp))
+  
+  df <- data.frame(row.names = row.names(VE_sub@meta.data), cluster =
+                     as.character(VE_sub$RNA_snn_res.0.2), stringsAsFactors = F)
+                
+  df <- as.data.frame(merge(df, tmp, by = 0))
+  rownames(df)<-df$Row.names
+  df<-df[,c("cluster",i),drop=F]
+  names(df)<-c("cluster","geneSet")
+  df %>% dplyr::group_by(cluster) %>% dplyr::summarize(Mean = mean(geneSet, na.rm=TRUE)) -> df.tmp
+  df.tmp$Mean <- scale(df.tmp$Mean)
+  df <- merge(df, df.tmp, key = "cluster", all = T)
+  
+  df <- df[grep("mix", df$cluster, invert = T),]
+  gg <- ggplot(df, aes(y = geneSet, x = cluster, group = cluster, fill = Mean)) + 
+    geom_violin(scale = "area", trim = T, adjust = 3, draw_quantiles = c(0.25, 0.5, 0.75), color = "grey30") +
+    scale_fill_gradient2(low="#4575B4", mid="#F1E8BC",high="#D73027") +
+    ylab("AUC score") + xlab("cluster") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          panel.background = element_blank(),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          axis.line.x = element_line(color="black", size = .3),
+          axis.line.y = element_line(color="black", size = .3))+ggtitle(paste(i))
+  plot(gg)+ggtitle(paste(i))}
+
+```
+
+
+### Call markers for every cluster compared to all remaining cells, report only the positive
+
+```{r}
+
+VE_sub.marker<- FindAllMarkers(VE_sub, only.pos = TRUE, min.pct = 0.1,test.use = "wilcox", logfc.threshold = log(1.5))
+
+```
+
+### Figure S3A Heatmap showing expression of top 50 differentally expressed genesvariable genes of EmVE and ExVE.
+
+```{r}
+
+DoHeatmap(VE_sub, features = c("Cyba",
+"Spc25",
+"Hmga1b",
+"Asl",
+"Gpc3",
+"Ebp",
+"Cldn7",
+"Spink1",
+"Sycp3",
+"Tmem37",
+"Cldn6",
+"Chchd10",
+"Cited1",
+"Fasn",
+"Ass1",
+"Rab4a",
+"Soat2",
+"H2???K1",
+"Tmem9",
+"Adk",
+"Apoc2",
+"Lss",
+"Cyp26a1",
+"Pcyt2",
+"Tfec",
+"Lefty2",
+"Utf1",
+"Hmga1",
+"Apob",
+"Reep6",
+"Tm7sf2",
+"Dhcr7",
+"2610528J11Rik",
+"Eml1",
+"Acat2",
+"Car4",
+"Mvd",
+"Sqle",
+"Idi1",
+"Hmgb3",
+"Ctsc",
+"Apoe",
+"Slc40a1",
+"Slc7a7",
+"Msmo1",
+"Hmgcs1",
+"Tspan13",
+"Fdft1",
+"Amot",
+"Fdps",
+"Brms1l",
+"AC241534.1",
+"AC129085.1",
+"Arhgef40",
+"AC123832.2",
+"S100g",
+"Tmsb4x",
+"Lgals3",
+"Aqp8",
+"Fam213a",
+"Dkkl1",
+"Dut",
+"Dok2",
+"Ccnd3",
+"F3",
+"Prr13",
+"Echdc2",
+"S100a11",
+"Gjb5",
+"Rhox5",
+"Serpinb6c",
+"Cryab",
+"Tax1bp3",
+"B2m",
+"Mgst3",
+"2200002D01Rik",
+"Gsn",
+"Atox1",
+"Pth1r",
+"Tagln2",
+"Spp1",
+"S100a10",
+"Plod2",
+"Htra1",
+"Dppa5a",
+"Cd9",
+"Anxa2",
+"Glipr2",
+"Plaur",
+"Lamb1",
+"Pdlim4",
+"Nostrin",
+"Tmsb10",
+"Tpm4",
+"Hs3st1",
+"Sat1",
+"Fabp3",
+"Lamc1",
+"Lama1",
+"P4ha2"), label = F)   + scale_fill_gradientn(colors = c("#4575B4", "#F1E8BC", "#D73027"))
+
+
+```
+
+---
+title: "Fig4_S4"
+author: "Arik Horne"
+date: "15 September 2021"
+output: html_document
+---
+
+### We work with the Seurat objects Seurat_RtL_Embryoid (SMART-seq2 Data of RtL-Embrioids)
+
+
+### Clustering of Epi-like subcluster 
+
+```{r}
+# Selecting Epi-like subcluster  and subsetting the Seurat object
+
+Idents(Seurat_RtL_Embryoid) <- "cluster_ident"
+
+Epi_sub <-subset(Seurat_RtL_Embryoid, idents = c("Epi_like_cells"))
+
+```
+
+```{r}
+# ### Identification of highly variable features in Epi-like subcluster
+
+Epi_sub <- FindVariableFeatures(Epi_sub, selection.method = "vst", nfeatures = 2000)
+
+```
+
+###  We apply a linear transformation to the Normalized data, this scales and centers the  features in the Epi-like datasets
+
+```{r}
+
+all.genes <- rownames(x = Epi_sub)
+
+Epi_sub <- ScaleData(object = Epi_sub, features = all.genes)
+
+```
+
+### Run a PCA dimensionality reduction scaled Epi-like data
+
+```{r}
+
+Epi_sub <- RunPCA(object = Epi_sub, features = VariableFeatures(object = Epi_sub),verbose = FALSE)
+
+```
+
+### Computes the k.param nearest neighbors for Epi-like data and identify clusters of cells by a shared nearest neighbor (SNN)
+
+```{r}
+
+Epi_sub <- FindNeighbors(Epi_sub, dims = 1:4)
+
+Epi_sub <- FindClusters(Epi_sub, resolution = 0.3)
+
+```
+
+
+### Perform non-linear dimensional reduction (UMAP) to visualize and explore Epi-like datasets. 
+auc
+```{r}
+
+Epi_sub <- RunUMAP(Epi_sub, dims = 1:10)
+
+```
+
+### Figure 4A) UMAP representation of Epi-like cluster revealing two subclusters diverging in their transcriptional profile.
+
+```{r}
+
+Idents(Epi_sub) <- "RNA_snn_res.0.3"
+
+DimPlot(object = Epi_sub, reduction = 'umap')
+
+```
+
+### Figure 4A) UMAP representation of Epi-like cluster revealing two subclusters diverging in their transcriptional profile.
+
+```{r}
+
+Idents(Epi_sub) <- "RNA_snn_res.0.3"
+
+DimPlot(object = Epi_sub, reduction = 'umap')
+
+```
+
+
+### Call markers for Epi cluster compared to all remaining cells, report only the positive
+
+```{r}
+
+Epi_sub.marker<- FindAllMarkers(Epi_sub, only.pos = TRUE, min.pct = 0.1,test.use = "wilcox", logfc.threshold = log(1.5))
+
+```
+
+
+### Figure 4B) AUCell-based enrichment scores (AUC scores) showing similarity of gene expression signatures of Cheng et al. 2019 Anterior-, Transition-, Posterior-signature in the Epi-like cells. 
+
+```{r}
+
+### Build  expression-based ranking for all the genes in each cell
+
+Seurat_RtL_Embryoid_matrix <-as.data.frame(as.matrix(Seurat_RtL_Embryoid@assays$RNA@data))
+
+filtered_matrix<-rowSums(Seurat_RtL_Embryoid_matrix > 0)
+
+filtered_matrix<-filtered_matrix[filtered_matrix>10]
+
+Seurat_RtL_Embryoid_matrix <- Seurat_RtL_Embryoid_matrix[row.names(Seurat_RtL_Embryoid_matrix) %in% names(filtered_matrix),]
+
+Aucell_Seurat_RtL_Embryoid_matrix <- AUCell_buildRankings(as.matrix(Seurat_RtL_Embryoid_matrix),nCores = 30)
+
+### Create a List of Cheng et al. 2019 signatures for AVE . Link for signatures (https://www.cell.com/cms/10.1016/j.celrep.2019.02.031/attachment/013a572c-448f-4fc6-a2f1-a1c63f6acd2b/mmc9.xlsx)
+
+Anterior_Transition_Posterior
+
+Anterior_Cheng_Top_100 <-read.table("C:/Users/arik/SMART-seq2_RtL_embryoids/Anterior_Cheng.csv", sep="\t",stringsAsFactors = FALSE)
+
+Transition_Cheng_Top_100 <-read.table("C:/Users/arik/SMART-seq2_RtL_embryoids/Transition_Cheng.csv", sep="\t",stringsAsFactors = FALSE)
+
+Posterior_Cheng_Top_100 <-read.table("C:/Users/arik/SMART-seq2_RtL_embryoids/Posterior_Cheng.csv", sep="\t",stringsAsFactors = FALSE)
+
+
+Anterior_Cheng_Top_100 <-Anterior_Cheng_Top_100$V1
+
+Transition_Cheng_Top_100 <-Transition_Cheng_Top_100$V1
+
+Posterior_Cheng_Top_100 <-Posterior_Cheng_Top_100$V1
+
+
+A_T_P_Cheng_Signature<-list()
+
+A_T_P_Cheng_Signature[[1]]<- Anterior_Cheng_Top_100
+
+A_T_P_Cheng_Signature[[2]]<- Transition_Cheng_Top_100
+
+A_T_P_Cheng_Signature[[3]]<- Posterior_Cheng_Top_100
+
+
+
+names(A_T_P_Cheng_Signature)<-c("Anterior_Cheng","Transition_Cheng","Posterior_Cheng")
+
+
+### Calculate a matrix with an AUC score for each gene-set in each cell and plots the AUC scores for all clusters as a violin plot
+
+cells_AUC <- AUCell_calcAUC(A_T_P_Cheng_Signature, Aucell_Seurat_RtL_Embryoid_matrix, aucMaxRank = ceiling(0.1 * nrow(Aucell_Seurat_RtL_Embryoid_matrix)), normAUC = T,nCores=1)
+for (i in names(A_T_P_Cheng_Signature)) {
+  tmp <- getAUC(cells_AUC)
+  tmp <- as.data.frame(t(tmp))
+  
+  df <- data.frame(row.names = row.names(Seurat_RtL_Embryoid@meta.data), cluster =
+                     as.character(Seurat_RtL_Embryoid$cluster_ident), stringsAsFactors = F)
+                
+  df <- as.data.frame(merge(df, tmp, by = 0))
+  rownames(df)<-df$Row.names
+  df<-df[,c("cluster",i),drop=F]
+  names(df)<-c("cluster","geneSet")
+  df %>% dplyr::group_by(cluster) %>% dplyr::summarize(Mean = mean(geneSet, na.rm=TRUE)) -> df.tmp
+  df.tmp$Mean <- scale(df.tmp$Mean)
+  df <- merge(df, df.tmp, key = "cluster", all = T)
+  
+  df <- df[grep("mix", df$cluster, invert = T),]
+  gg <- ggplot(df, aes(y = geneSet, x = cluster, group = cluster, fill = Mean)) + 
+    geom_violin(scale = "area", trim = T, adjust = 3, draw_quantiles = c(0.25, 0.5, 0.75), color = "grey30") +
+    scale_fill_gradient2(low="#4575B4", mid="#F1E8BC",high="#D73027") +
+    ylab("AUC score") + xlab("cluster") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          panel.background = element_blank(),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          axis.line.x = element_line(color="black", size = .3),
+          axis.line.y = element_line(color="black", size = .3))+ggtitle(paste(i))
+  plot(gg)+ggtitle(paste(i))}
+
+```
+
+
+
+
+
+
+
+
+### Figure 4C) Marker gene expression for Anterior-, Transition- and Posterior marker genes.
+
+```{r}
+
+Idents(Seurat_RtL_Embryoid) <- "cluster_ident"
+
+DotPlot(Seurat_RtL_Embryoid , features= c("Aire","Fam25c","Liph","Inpp5d","Dppa2","Spp1","Zp3","Cyp2b23","Gpx2","Gtsf1","1700029P11Rik","Smtnl1","Fetub","Trh","Dnajc6","Ramp3","Fos","Ntrk2","Kcnj3","Fosb","Spon1","Mmp16","Gpr85","Cda","Lgi2","Rgl3","Pcsk2","Kdr","Klhl6","Wnt2","Mesp1","Pmp22","Aplnr","Cdh11","T","Asb4","Cxcr4","Bmper","Nrp1","Mixl1"))+ scale_colour_gradient2(low = "#4575B4", mid = "#F1E8BC", high = "#D73027") + coord_flip()
+
+
+```
+
+
+### Figure 4J) Heatmap showing expression of core-, naïve-, and primed-pluripotency factors across cells of Epi-like clusters
+
+```{r}
+
+DoHeatmap(object = Epi_sub,features= c("Fgf4","Utf1","Sall4","Gdf3","Tdgf1","Pou5f1","Sox2","Nanog","Tbx3","Tfcp2l1","Fbxo15","Esrrb","Zfp42","Dppa3","Klf5","Klf4","Kfl2","Foxa2","Cer1","T","Nodal","Lef1","Fgf5"),label = F)   + scale_fill_gradientn(colors = c("#4575B4", "#F1E8BC", "#D73027"))
+
+```
+
+### Figure S4A) Heatmap showing expression of core-, naïve-, and primed-pluripotency factors across cells of all three compartments comprising RtL-embryoids.
+
+```{r}
+
+DoHeatmap(object = Seurat_RtL_Embryoid ,features= c("Fgf4","Utf1","Sall4","Gdf3","Tdgf1","Pou5f1","Sox2","Nanog","Tbx3","Tfcp2l1","Fbxo15","Esrrb","Zfp42","Dppa3","Klf5","Klf4","Kfl2","Foxa2","Cer1","T","Nodal","Lef1","Fgf5"),label = F)   + scale_fill_gradientn(colors = c("#4575B4", "#F1E8BC", "#D73027"))
+
+```
+
+
+### Figure S4C) Featureplots mapping expression of Bmp2 in cells of the VE-like cluster and Bmp4 and Bmp8b in cells of ExE-like Subcluster 1
+
+```{r}
+FeaturePlot(Seurat_RtL_Embryoid, pt.size = 2.7, features= c("Bmp2"),cols = c("#CCCCCC", "#B80F00"))
+
+FeaturePlot(Seurat_RtL_Embryoid, pt.size = 2.7, features= c("Bmp4"),cols = c("#CCCCCC", "#B80F00"))
+
+FeaturePlot(Seurat_RtL_Embryoid, pt.size = 2.7, features= c("Bmp4"),cols = c("#CCCCCC", "#B80F00"))
+
+```
+
+
+### Figure S4D) Violinplots showing  distinct subpopulation of cells expressing marker genes of PGC specification Nanos3, Kit, Dppa3 (Stella), and Tfap2c, identifying Epi-like subcluster 3 as cells displaying PGC-like cell fate.
+
+```{r}
+VlnPlot(Epi_sub, features = "Nanos3", pt.size = 0) + ylim(0,3) +stat_summary(fun.y = mean, geom='point', size = 10, colour = "black",shape = 95)
+VlnPlot(Epi_sub, features = "Kit", pt.size = 0) + ylim(0,3) +stat_summary(fun.y = mean, geom='point', size = 10, colour = "black",shape = 95)
+VlnPlot(Epi_sub, features = "Dppa3", pt.size = 0) + ylim(0,5) +stat_summary(fun.y = mean, geom='point', size = 10, colour = "black",shape = 95)
+VlnPlot(Epi_sub, features = "Tfap2c", pt.size = 0) + ylim(0,5) +stat_summary(fun.y = mean, geom='point', size = 10, colour = "black",shape = 95)
+
+```
+
+---
+title: "Fig5_S5"
+author: "Arik Horne"
+date: "15 September 2021"
+output: html_document
+---
+
+
+### We work with 2 Seurat objects 1. Seurat_RtL_Embryoid_ExE_sub (SMART-seq2 Data of RtL-Embrioids)
+                                  2. Seurat_3D_RtL_Embrioid_2D_culture (SMART-seq2 Data of RtL-Embrioids + 2D monoculture equivalents)
+
+### Clustering of ExE-like subcluster 
+
+```{r}
+
+# Selecting ExE-like subcluster  and subsetting the Seurat object
+
+Idents(Seurat_RtL_Embryoid_ExE_sub) <- "cluster_ident"
+
+ExE_sub <-subset(Seurat_RtL_Embryoid_ExE_sub, idents = c("ExE_like_cells"))
+
+```
+
+###  We apply a linear transformation to the Normalized data, this scales and centers the  features in the ExE-like datasets
+
+```{r}
+
+all.genes <- rownames(x = ExE_sub)
+
+ExE_sub <- ScaleData(object = ExE_sub, features = all.genes)
+
+```
+
+### Run a PCA dimensionality reduction scaled ExE-like data
+
+```{r}
+
+ExE_sub <- RunPCA(object = ExE_sub, features = VariableFeatures(object = ExE_sub),verbose = FALSE)
+
+```
+
+### Computes the k.param nearest neighbors for ExE-like data and identify clusters of cells by a shared nearest neighbor (SNN)
+
+```{r}
+
+ExE_sub <- FindNeighbors(ExE_sub, dims = 1:4)
+
+ExE_sub <- FindClusters(ExE_sub, resolution = 0.1)
+
+```
+
+
+### Perform non-linear dimensional reduction (UMAP) to visualize and explore ExE-like datasets. 
+auc
+```{r}
+
+ExE_sub <- RunUMAP(ExE_sub, dims = 1:10)
+
+```
+
+### Figure 5A) UMAP representation of ExE-like cluster revealing two subclusters diverging in their transcriptional profile.
+
+```{r}
+
+Idents(ExE_sub) <- "RNA_snn_res.0.1"
+
+DimPlot(object = ExE_sub, reduction = 'umap')
+
+```
+
+### Figure 5B) UMAP representation of ExE-like cluster revealing two subclusters diverging in their transcriptional profile.
+
+```{r}
+
+plot_Fig5B1 <- VlnPlot(ExE_sub, features = "Id2", pt.size = 0) + ylim(0,5) +stat_summary(fun.y = mean, geom='point', size = 10, colour = "black",shape = 95)
+
+plot_Fig5B2 <- VlnPlot(ExE_sub, features = "Igf2", pt.size = 0) + ylim(0,5)  +stat_summary(fun.y = mean, geom='point', size = 10, colour = "black",shape = 95)
+
+plot_Fig5B3 <- VlnPlot(ExE_sub, features = "Eomes", pt.size = 0) + ylim(0,5) +stat_summary(fun.y = mean, geom='point', size = 10, colour = "black",shape = 95)
+
+plot_Fig5B4 <- VlnPlot(ExE_sub, features = "Tfap2c", pt.size = 0) + ylim(0,5)  +stat_summary(fun.y = mean, geom='point', size = 10, colour = "black",shape = 95)
+
+plot_Fig5B5 <- VlnPlot(ExE_sub, features = "Gata3", pt.size = 0) + ylim(0,5)   +stat_summary(fun.y = mean, geom='point', size = 10, colour = "black",shape = 95)
+
+plot_Fig5B6 <- VlnPlot(ExE_sub, features = "Bmp4", pt.size = 0) + ylim(0,5) +stat_summary(fun.y = mean, geom='point', size = 10, colour = "black",shape = 95)
+
+plot_Fig5B7 <- VlnPlot(ExE_sub, features = "Bmp8b", pt.size = 0) + ylim(0,5)  +stat_summary(fun.y = mean, geom='point', size = 10, colour = "black",shape = 95)
+
+plot_Fig5B8 <- VlnPlot(ExE_sub, features = "Hand1", pt.size = 0) + ylim(0,5) +stat_summary(fun.y = mean, geom='point', size = 10, colour = "black",shape = 95)
+
+plot_Fig5B9 <- VlnPlot(ExE_sub, features = "Plet1", pt.size = 0) + ylim(0,5)  +stat_summary(fun.y = mean, geom='point', size = 10, colour = "black",shape = 95)
+
+plot_Fig5B10 <- VlnPlot(ExE_sub, features = "Elf5", pt.size = 0) + ylim(0,5)   +stat_summary(fun.y = mean, geom='point', size = 10, colour = "black",shape = 95)
+
+
+CombinePlots(plots = list(plot_Fig5B1,plot_Fig5B2,plot_Fig5B3,plot_Fig5B4,plot_Fig5B5,plot_Fig5B6,plot_Fig5B7,plot_Fig5B8,plot_Fig5B9,plot_Fig5B10))
+
+```
+
+### Call markers for ExE cluster compared to all remaining cells, report only the positive
+
+```{r}
+
+ExE_sub.marker<- FindAllMarkers(ExE_sub, only.pos = TRUE, min.pct = 0.1,test.use = "wilcox", logfc.threshold = log(1.5))
+
+```
+
+
+### Figure S5A Heatmap depicting the top 50 differentially expressed genes variable genes of the two ExE-Subclusters.
+
+```{r}
+
+DoHeatmap(ExE_sub, features = c("Bex2",
+"Lgals4",
+"H2-D1",
+"H2-K1",
+"Slc39a2",
+"Apela",
+"Rnase4",
+"Blnk",
+"Id3",
+"Cd59a",
+"Vim",
+"Ctsl",
+"Sat1",
+"Lgals3",
+"Psme1",
+"Lmna",
+"N?l3",
+"Fstl1",
+"Spp1",
+"Sorl1",
+"Ociad2",
+"Tspan1",
+"Hoxa11os",
+"Smagp",
+"Scpep1",
+"Dhrs3",
+"Qdpr",
+"Selenbp1",
+"Cd47",
+"Atp1b1",
+"Fam213a",
+"B2m",
+"Wls",
+"Gabarap",
+"Gpx3",
+"Nupr1",
+"I?tm1",
+"Itm2b",
+"Psme2",
+"Tspan7",
+"Map1lc3b",
+"Dazap2",
+"Cadm1",
+"Tifa",
+"Mdk",
+"Tcf7l2",
+"Pdpn",
+"Smim14",
+"Gpc3",
+"Pla2g7",
+"Mir3091",
+"AC161763.1",
+"Cdkn1c",
+"Arhgef40",
+"Brms1l",
+"A430103D13Rik",
+"Car4",
+"AC123832.2",
+"AC241534.1",
+"Snhg14",
+"Cldn4",
+"Cotl1",
+"Fbp2",
+"Rhox6",
+"Phlda2",
+"Upp1",
+"Vamp3",
+"Ass1",
+"Krt18",
+"AC129085.1",
+"Capg",
+"Zfp131",
+"Apoc1",
+"Snf8",
+"Rhox9",
+"Slc2a1",
+"Gtpbp4",
+"Fdps",
+"Bcat1",
+"Elf5",
+"Dppa4",
+"Hat1",
+"Slc29a1",
+"Uchl5",
+"Bmp4",
+"Sfn",
+"Dppa5a",
+"Tinagl1",
+"Anp32b",
+"Plet1",
+"Nup62cl",
+"Cldn3",
+"Hand1",
+"Morc4",
+"Car2",
+"Ddah1",
+"Gjb5",
+"Rhox5",
+"Utf1",
+"Gjb3"), label = F)   + scale_fill_gradientn(colors = c("#4575B4", "#F1E8BC", "#D73027"))
+
+```
+
+
+### Figure 5C GO term enrichment analysis of top 100 most differentially expressed genes across ExE clusters.
+
+```{r}
+
+#### get marker genes for ExE-like cells, VE-like cells, Epi-like cells
+
+ExE_like_Sub_2 <- subset(ExE_sub.marker, cluster == "1")
+
+ExE_like_Sub_1 <- subset(ExE_sub.marker, cluster == "0")
+
+#### get Top100 (fold change) marker genes
+
+ExE_like_Sub_2 <-row.names(ExE_like_Sub_2)
+
+ExE_like_Sub_1 <-row.names(ExE_like_Sub_1)
+
+#### clusterProfiler with Top100 (fold change) marker genes
+
+ExE_like_Sub_1_bitr<- bitr(ExE_like_Sub_1, fromType="SYMBOL", toType=c("ENTREZID","SYMBOL","ENSEMBL"), OrgDb="org.Mm.eg.db")
+
+ExE_like_Sub_1_bitr<- enrichGO(gene          = ExE_marker_bitr$ENTREZID,
+                                                 OrgDb         = org.Mm.eg.db,
+                                                 ont           = "BP",
+                                                 pAdjustMethod = "fdr",
+                                                 pvalueCutoff  = 0.05,
+                                                 qvalueCutoff  = 0.01,
+                                                 readable      = TRUE)
+
+barplot(ExE_like_Sub_1_bitr, showCategory=5)
+
+#########################################################################
+
+ExE_like_Sub_2_bitr<- bitr(ExE_like_Sub_2, fromType="SYMBOL", toType=c("ENTREZID","SYMBOL","ENSEMBL"), OrgDb="org.Mm.eg.db")
+
+ExE_like_Sub_2_bitr<- enrichGO(gene          = ExE_like_Sub_2_bitr$ENTREZID,
+                                                 OrgDb         = org.Mm.eg.db,
+                                                 ont           = "BP",
+                                                 pAdjustMethod = "fdr",
+                                                 pvalueCutoff  = 0.05,
+                                                 qvalueCutoff  = 0.01,
+                                                 readable      = TRUE)
+
+barplot(ExE_like_Sub_2_bitr, showCategory=5)
+
+```
+
+### Figure 5D) Dotplot displaying FGF- receptor and ligand expressing cells throughout VE-, Epi- and ExE-like (Sub)clusters.
+
+
+### Reclustering of Seurat_RtL_Embryoid_ExE_sub
+
+
+### Computes the k.param nearest neighbors for Seurat_RtL_Embryoid_ExE_sub data and identify clusters of cells by a shared nearest neighbor (SNN)
+
+```{r}
+
+Seurat_RtL_Embryoid_ExE_sub<- FindNeighbors(Seurat_RtL_Embryoid_ExE_sub, dims = 1:10)
+
+Seurat_RtL_Embryoid_ExE_sub <- FindClusters(Seurat_RtL_Embryoid_ExE_sub, resolution = 0.25)
+
+```
+
+
+### Perform non-linear dimensional reduction (UMAP) to visualize and explore Seurat_RtL_Embryoid datasets. 
+auc
+```{r}
+
+Seurat_RtL_Embryoid_ExE_sub <- RunUMAP(Seurat_RtL_Embryoid_ExE_sub, dims = 1:10)
+
+```
+
+
+### Perform non-linear dimensional reduction (UMAP) to visualize and explore Seurat_RtL_Embryoid datasets. 
+auc
+```{r}
+
+DotPlot(Seurat_RtL_Embryoid_ExE_sub, features = c("Fgfbp1","Fgf15","Fgf10","Fgf8","Fgf5","Fgf4","Fgfr4","Fgfr2","Fgfrl1","Fgfr1")) + RotatedAxis()
+
+```
+
+
+### Figure 5E) Featureplots depicting expression of FGF4 downstream signaling targets within the ExE-like cluster. 
+
+```{r}
+FeaturePlot(ExE_sub, pt.size = 2.7, features= c("Elf5"),cols = c("#CCCCCC", "#B80F00"))
+
+FeaturePlot(ExE_sub, pt.size = 2.7, features= c("Eomes"),cols = c("#CCCCCC", "#B80F00"))
+
+FeaturePlot(ExE_sub, pt.size = 2.7, features= c("Cdx2"),cols = c("#CCCCCC", "#B80F00"))
+
+FeaturePlot(ExE_sub, pt.size = 2.7, features= c("Gata3"),cols = c("#CCCCCC", "#B80F00"))
+
+FeaturePlot(ExE_sub, pt.size = 2.7, features= c("Ets2"),cols = c("#CCCCCC", "#B80F00"))
+
+FeaturePlot(ExE_sub, pt.size = 2.7, features= c("Esrrb"),cols = c("#CCCCCC", "#B80F00"))
+
+```
+
+
+### Figure 5F) UMAP representation including transcriptional profiles of iTSCs obtained from reprogramming in FGF4/Heparin supplemented 2D mono-culture, shows close clustering of iTSCs and ExE-like Subcluster 1, both of which display high expression of the FGF4 receptor Fgfr2.
+
+### Clustering of ExE_sub_3D_2D subcluster 
+
+```{r}
+
+# Selecting 3D ExE_sub_3D_2D cells and 2D 2D iTSC  subcluster  and subsetting the Seurat object
+
+ExE_sub_3D_2D <-subset(Seurat_3D_RtL_Embrioid_2D_culture, idents = c("2D_iTSC","3D_ExE"))
+
+# Selecting ExE_sub_3D_2D subcluster  and subsetting the Seurat object
+
+Idents(Seurat_RtL_Embryoid_ExE_sub) <- "group"
+
+ExE_sub_3D_2D <-subset(Seurat_RtL_Embryoid_ExE_sub_3D_2D, idents = c("2D_iTSC","3D_ExE"))
+
+```
+
+###  We apply a linear transformation to the Normalized data, this scales and centers the  features in the ExE_sub_3D_2D datasets
+
+```{r}
+
+all.genes <- rownames(x = ExE_sub_3D_2D)
+
+ExE_sub_3D_2D <- ScaleData(object = ExE_sub_3D_2D, features = all.genes)
+
+```
+
+### Run a PCA dimensionality reduction scaled ExE_sub_3D_2D data
+
+```{r}
+
+ExE_sub_3D_2D <- RunPCA(object = ExE_sub_3D_2D, features = VariableFeatures(object = ExE_sub_3D_2D),verbose = FALSE)
+
+```
+
+### Computes the k.param nearest neighbors for ExE_sub_3D_2D data and identify clusters of cells by a shared nearest neighbor (SNN)
+
+```{r}
+
+ExE_sub_3D_2D <- FindNeighbors(ExE_sub_3D_2D, dims = 1:6)
+
+ExE_sub_3D_2D <- FindClusters(ExE_sub_3D_2D, resolution = 0.2)
+
+```
+
+
+### Perform non-linear dimensional reduction (UMAP) to visualize and explore ExE_sub_3D_2D datasets. 
+auc
+```{r}
+
+ExE_sub_3D_2D <- RunUMAP(ExE_sub_3D_2D, dims = 1:6)
+
+```
+
+### UMAP representation of ExE_sub_3D_2D cluster revealing two subclusters diverging in their transcriptional profile.
+
+```{r}
+
+Idents(ExE_sub_3D_2D) <- "RNA_snn_res.0.2"
+
+DimPlot(object = ExE_sub_3D_2D, reduction = 'umap')
+
+FeaturePlot(ExE_sub_3D_2D, pt.size = 2.7, features= c("Fgfr2"),cols = c("#CCCCCC", "#B80F00"))
+
+```
+
+
+### Figure 5H) Bar plots displaying distribution of cell cycle phases in ExE-like Subcluster 1, 2 and iTSCs, as assessed by Nestorowa et al.
+
+```{r}
+
+# Read in the expression matrix The first row is a header row, the first column is rownames
+
+
+exp.mat <- read.table(file = "C:/Users/arik_/OneDrive/Desktop/Bioinformatics/SMART-seq2_Schorle/CellCycle analysis/nestorawa_forcellcycle_expressionMatrix.txt", header = TRUE, 
+                      as.is = TRUE, row.names = 1)
+
+# A list of cell cycle markers, from Tirosh et al, 2015, is loaded with Seurat.  We can
+# segregate this list into markers of G2/M phase and markers of S phase
+
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+
+# Basic function to convert human to mouse gene names
+convertHumanGeneList <- function(x){
+  require("biomaRt")
+  human = useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+  mouse = useMart("ensembl", dataset = "mmusculus_gene_ensembl")
+  genesV2 = getLDS(attributes = c("hgnc_symbol"), filters = "hgnc_symbol", values = x , mart = human, attributesL = c("mgi_symbol"), martL = mouse, uniqueRows=T)
+  humanx <- unique(genesV2[, 2])
+  # Print the first 6 genes found to the screen
+  print(head(humanx))
+  return(humanx)
+}
+
+s.genes <- convertHumanGeneList(s.genes)
+
+g2m.genes <- convertHumanGeneList(g2m.genes)
+
+#Assign Cell-Cycle Scores
+
+ExE_sub_3D_2D <- CellCycleScoring(ExE_sub_3D_2D, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+
+# Running a PCA on cell cycle genes reveals, unsurprisingly, that cells separate entirely by
+# phase
+
+ExE_sub_3D_2D <- RunPCA(ExE_sub_3D_2D, features = c(s.genes, g2m.genes))
+DimPlot(ExE_sub_3D_2D)
+
+
+#Subset each cluster and identify cell numbers
+
+Idents(ExE_sub_3D_2D) <- "RNA_snn_res.0.2"
+
+
+ExE_sub_3D_2D_EXE_sub2<-subset(ExE_sub_3D_2D, idents = "0")
+
+ExE_sub_3D_2D_EXE_sub1<-subset(ExE_sub_3D_2D, idents = "1")
+
+ExE_sub_3D_2D_EXE_2d<-subset(ExE_sub_3D_2D, idents = "2")
+
+
+table(ExE_sub_3D_2D_EXE_sub2$Phase)
+
+table(ExE_sub_3D_2D_EXE_sub1$Phase)
+
+table(ExE_sub_3D_2D_EXE_2d$Phase)
+
+```
+
+
+### Figure S5C) Ridgeline plots of proliferation marker gene expression in the two ExE-like Subcluster and iTSCs, highlighting the stem cell character of ExE-like Subcluster 1. 
+
+```{r}
+
+RidgePlot(ExE_sub_3D_2D, features = c("Pcna", "Top2a", "Mcm6", "Mki67"), ncol = 2)
+
+```
+
+
+---
+title: "Fig6"
+author: "Arik Horne"
+date: "15 September 2021"
+output: html_document
+---
+
+
+### We work with the Seurat objects Seurat_RtL_Embryoid (SMART-seq2 Data of RtL-Embrioids)
+                                  
+
+
+Figure 6A) Prioritized upstream ligands from all embryo-like compartments based on the interaction with all other cells and their average expression ; In the right panel are potential receptors expressed by the corresponding compartment and their average expression. (We perform NichNet analysis exemplary for the VE-like cells. Same parameters were used for Epi-like cells and ExE-like cells)
+
+### Read in NicheNet's ligand-target prior model, ligand-receptor network and weighted integrated networks:
+
+```{r}
+# Read in NicheNet's ligand-target prior model, ligand-receptor network and weighted integrated networks:
+
+# ligand_target_matrix
+
+ligand_target_matrix = readRDS(url("https://zenodo.org/record/3260758/files/ligand_target_matrix.rds"))
+
+# ligand-receptor network
+
+lr_network = readRDS(url("https://zenodo.org/record/3260758/files/lr_network.rds"))
+
+# weighted integrated networks
+
+weighted_networks = readRDS(url("https://zenodo.org/record/3260758/files/weighted_networks.rds"))
+weighted_networks_lr = weighted_networks$lr_sig %>% inner_join(lr_network %>% distinct(from,to), by = c("from","to"))
+
+```
+ 
+ 
+## Define a "receiver/target" cell population and determine which genes are expressed in both populations (VE_like_cells)
+
+```{r}
+## receiver
+
+receiver = "VE_like_cells"
+expressed_genes_receiver = get_expressed_genes(receiver, seuratObj, pct = 0.10)
+
+background_expressed_genes = expressed_genes_receiver %>% .[. %in% rownames(ligand_target_matrix)]
+
+```
+
+## Define "sender/niche" cell populations
+
+```{r}
+
+## sender
+
+sender_celltypes = c("ExE_like_cells","Epi_like_cells")
+
+list_expressed_genes_sender = sender_celltypes %>% unique() %>% lapply(get_expressed_genes, seuratObj, 0.10) # lapply to get the expressed genes of every sender cell type separately here
+expressed_genes_sender = list_expressed_genes_sender %>% unlist() %>% unique()
+
+```
+
+
+###Define a gene set of interest: these are the genes in the "receiver/target" cell population that are potentially affected by ligands expressed by interacting cells (e.g. genes differentially expressed upon cell-cell interaction)
+
+```{r}
+
+Seurat_RtL_Embryoid.marker<- FindAllMarkers(Seurat_RtL_Embryoid, only.pos = TRUE, min.pct = 0.1,test.use = "wilcox", logfc.threshold = log(1.5))
+
+#### get marker genes for ExE-like cells, VE-like cells, Epi-like cells
+
+VE.marker <- subset(Seurat_RtL_Embryoid.marker, cluster == "VE_like_cells")
+
+DE_table_receiver = VE.marker
+
+geneset_oi = DE_table_receiver %>% filter(p_val_adj <= 0.05 & abs(avg_log2FC) >= 0.25) %>% pull(gene)
+geneset_oi = geneset_oi %>% .[. %in% rownames(ligand_target_matrix)]
+
+
+```
+
+### Define a set of potential ligands: these are ligands that are expressed by the "sender/niche" cell population and bind a (putative) receptor expressed by the "receiver/target" population
+
+```{r}
+
+ligands = lr_network %>% pull(from) %>% unique()
+receptors = lr_network %>% pull(to) %>% unique()
+
+expressed_ligands = intersect(ligands,expressed_genes_sender)
+expressed_receptors = intersect(receptors,expressed_genes_receiver)
+
+potential_ligands = lr_network %>% filter(from %in% expressed_ligands & to %in% expressed_receptors) %>% pull(from) %>% unique()
+
+```
+
+
+### Perform NicheNet ligand activity analysis for VE-like cells. Rank the potential ligands based on the presence of their target genes in the gene set of interest (compared to the background set of genes)
+
+```{r}
+
+ligand_activities = predict_ligand_activities(geneset = geneset_oi, background_expressed_genes = background_expressed_genes, ligand_target_matrix = ligand_target_matrix, potential_ligands = potential_ligands)
+
+ligand_activities = ligand_activities %>% arrange(-pearson) %>% mutate(rank = rank(desc(pearson)))
+
+```
+
+### The number of top-ranked ligands that are further used to predict active target genes and construct an active ligand-receptor network is here 6.
+
+```{r}
+
+best_upstream_ligands = ligand_activities %>% top_n(6, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique()
+
+```
+
+###  Dotplot to see which cell population expresses which of these top-ranked ligands
+
+```{r}
+
+DotPlot(Seurat_RtL_Embryoid, features = best_upstream_ligands %>% rev(), cols = "RdYlBu") + RotatedAxis()
+
+```
+
+
+
+###  Dotplot to see which cell population expresses the predicted receptors
+
+```{r}
+
+DotPlot(Seurat_RtL_Embryoid, features= c("Acvr1",
+"Acvr1b",
+"Acvr2a",
+"Acvr2b",
+"Atp5b",
+"Bmpr1a",
+"Bmpr2",
+"Cd44",
+"Cd47",
+"Cntnap1",
+"Ddr1",
+"Eng",
+"Epha2",
+"Fgfr1",
+"Fgfr2",
+"Fgfr3",
+"Fgfr4",
+"Fgfrl1",
+"Folr1",
+"Fzd6",
+"Gpc4",
+"Igf2r",
+"Itga4",
+"Itgb1",
+"Kit",
+"Kremen1",
+"Lrp1",
+"Lrp5",
+"Lrp6",
+"M6pr",
+"Ncam1",
+"Ncstn",
+"Nectin1",
+"Nectin3",
+"Neo1",
+"Notch1",
+"Notch2",
+"Notch3",
+"Nrp1",
+"Pik3cb",
+"Pkd2",
+"Prnp",
+"Ptch1",
+"Rgma",
+"Rgmb",
+"Ror2",
+"Sort1",
+"Tfrc",
+"Trim27",
+"Tsku"))+ scale_colour_gradient2(low = "#4575B4", mid = "#F1E8BC", high = "#D73027")
+
+```
+
+
+
+
+Figure 6B) Potential target genes of the prioritized upstream ligands 
+
+### Plot Receptors top-ranked ligands
+
+```{r}
+
+lr_network_top = lr_network %>% filter(from %in% best_upstream_ligands & to %in% expressed_receptors) %>% distinct(from,to)
+best_upstream_receptors = lr_network_top %>% pull(to) %>% unique()
+
+lr_network_top_df_large = weighted_networks_lr %>% filter(from %in% best_upstream_ligands & to %in% best_upstream_receptors)
+
+lr_network_top_df = lr_network_top_df_large %>% spread("from","weight",fill = 0)
+lr_network_top_matrix = lr_network_top_df %>% select(-to) %>% as.matrix() %>% magrittr::set_rownames(lr_network_top_df$to)
+
+dist_receptors = dist(lr_network_top_matrix, method = "binary")
+hclust_receptors = hclust(dist_receptors, method = "ward.D2")
+order_receptors = hclust_receptors$labels[hclust_receptors$order]
+    
+dist_ligands = dist(lr_network_top_matrix %>% t(), method = "binary")
+hclust_ligands = hclust(dist_ligands, method = "ward.D2")
+order_ligands_receptor = hclust_ligands$labels[hclust_ligands$order]
+
+order_receptors = order_receptors %>% intersect(rownames(lr_network_top_matrix))
+order_ligands_receptor = order_ligands_receptor %>% intersect(colnames(lr_network_top_matrix))
+
+vis_ligand_receptor_network = lr_network_top_matrix[order_receptors, order_ligands_receptor]
+rownames(vis_ligand_receptor_network) = order_receptors %>% make.names()
+colnames(vis_ligand_receptor_network) = order_ligands_receptor %>% make.names()
+
+```
+
+### Plot Receptors top-ranked ligands
+
+```{r}
+
+p_ligand_receptor_network = vis_ligand_receptor_network %>% t() %>% make_heatmap_ggplot("Ligands","Receptors", color = "mediumvioletred", x_axis_position = "top",legend_title = "Prior interaction potential")
+p_ligand_receptor_network
+
+```
+
+###  Dotplot to see which cell population expresses target genes 
+
+```{r}
+
+DotPlot(object = SMART_Schorle_sub_3_cluster,features= c("App",
+                                                         "Clic1",
+                                                         "Dkk1",
+                                                         "Elf3",
+                                                         "F3",
+                                                         "Gata4",
+                                                         "Gsn",
+                                                         "Hook2",
+                                                         "Id1",
+                                                         "P4ha2",
+                                                         "P4hb",
+                                                         "Pdgfra",
+                                                         "Plaur",
+                                                         "Sgk1",
+                                                         "Timp1",
+                                                         "Xbp1",
+                                                         "Alpl",
+                                                         "Bax",
+                                                         "Ccnd1",
+                                                         "Fam60a",
+                                                         "Fn1",
+                                                         "Hmga1",
+                                                         "Lefty1",
+                                                         "Phc1",
+                                                         "Pml",
+                                                         "Pou5f1",
+                                                         "Ptma",
+                                                         "Sox2",
+                                                         "Stmn1",
+                                                         "Tdgf1",
+                                                         "Trp53",
+                                                         "Zmynd8",
+                                                         "Arpc2",
+                                                         "Bmp4",
+                                                         "Ccnd3",
+                                                         "Cdh1",
+                                                         "Cdkn1a",
+                                                         "Cdx2",
+                                                         "Gata3",
+                                                         "Hacd1",
+                                                         "Hand1",
+                                                         "Id2",
+                                                         "Id3",
+                                                         "Mmp2",
+                                                         "Myc",
+                                                         "Stat3",
+                                                         "Ubc"))+ scale_colour_gradient2(low = "#4575B4", mid = "#F1E8BC", high = "#D73027")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
